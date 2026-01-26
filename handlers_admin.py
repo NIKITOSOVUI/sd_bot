@@ -313,11 +313,25 @@ def format_order_block(order) -> str:
     delivery_type = order.get("delivery_type", "Не указан")
     delivery_address = order.get("delivery_address", "Не указан")
     comment = order.get("comment", "Без комментария")
+    prep_time = order.get("prep_time", "Не указано")
     text = order.get("text", "")
+
+    # Добавляем <b>СЕГОДНЯ</b>/<b>ЗАВТРА</b> перед временем
+    if prep_time != "Не указано":
+        try:
+            prep_dt = datetime.datetime.strptime(prep_time, "%d.%m.%Y %H:%M")
+            local_today = (datetime.datetime.utcnow() + LOCAL_TZ_OFFSET).date()
+            day_label = "СЕГОДНЯ" if prep_dt.date() == local_today else "ЗАВТРА" if prep_dt.date() == local_today + datetime.timedelta(days=1) else ""
+            prep_time_with_day = f"<b>{day_label}</b> {prep_time}" if day_label else prep_time
+        except:
+            prep_time_with_day = prep_time
+    else:
+        prep_time_with_day = prep_time
 
     result = [
         f"<b>{time_str} (@{username})</b>",
         f"📞 {phone}",
+        f"⏰ Готовность к: {prep_time_with_day}",
     ]
 
     if delivery_type == "delivery":

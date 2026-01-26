@@ -13,6 +13,57 @@ router = Router()
 
 PICKUP_ADDRESS = "Братск, Центральный р-н, ул. Коммунальная, 15Б"
 
+# Часовой пояс ресторана: UTC+8 (Иркутск)
+LOCAL_TZ_OFFSET = datetime.timedelta(hours=8)
+
+# Рабочее время: 9:00 - 20:00 местного
+RESTAURANT_OPEN = datetime.time(9, 0)
+RESTAURANT_CLOSE = datetime.time(20, 0)
+
+# Время для заказов: с 10:00 до 19:30 шаг 30 мин
+ORDER_START_HOUR = 10
+ORDER_END_HOUR = 19
+TIME_STEP_MINUTES = 30
+
+
+def generate_time_options():
+    utc_now = datetime.datetime.utcnow()
+    local_now = utc_now + LOCAL_TZ_OFFSET
+    local_time = local_now.time()
+    local_date = local_now.date()
+
+    # Если заказ после 20:00 — все слоты на завтра
+    if local_time >= RESTAURANT_CLOSE:
+        base_date = local_date + datetime.timedelta(days=1)
+    else:
+        base_date = local_date
+
+    # Генерируем слоты с 10:00 до 19:30 шаг 30 мин
+    options = []
+    current = datetime.datetime.combine(base_date, datetime.time(ORDER_START_HOUR, 0))
+    end_time = datetime.datetime.combine(base_date, datetime.time(ORDER_END_HOUR, 30))
+
+    while current <= end_time:
+        time_str = current.strftime("%d.%m.%Y %H:%M")
+        label = current.strftime("%H:%M")
+        if current.date() > local_date:
+            label += " (завтра)"
+        options.append((label, time_str))
+        current += datetime.timedelta(minutes=TIME_STEP_MINUTES)
+
+    return options
+
+
+def get_restaurant_status_text():
+    utc_now = datetime.datetime.utcnow()
+    local_now = utc_now + LOCAL_TZ_OFFSET
+    local_time = local_now.time()
+
+    if RESTAURANT_OPEN <= local_time < RESTAURANT_CLOSE:
+        return "🟢 Ресторан сейчас открыт (до 20:00)"
+    else:
+        return "🔴 Ресторан сейчас закрыт (откроется в 9:00)"
+
 
 async def show_categories(msg_or_cb, state: FSMContext):
     data = await state.get_data()
@@ -30,11 +81,11 @@ async def show_categories(msg_or_cb, state: FSMContext):
 async def cmd_start(message: Message, state: FSMContext):
     current_state = await state.get_state()
 
-    # Защита: если пользователь в процессе оформления — блокируем /start
     if current_state in [
         UserStates.waiting_delivery_type.state,
         UserStates.waiting_address.state,
-        UserStates.waiting_comment.state
+        UserStates.waiting_comment.state,
+        UserStates.waiting_prep_time.state
     ]:
         await message.answer("Вы сейчас оформляете заказ. Завершите оформление или напишите /cancel для отмены.")
         return
@@ -193,14 +244,32 @@ async def checkout(callback: CallbackQuery, state: FSMContext):
 async def process_delivery_type(callback: CallbackQuery, state: FSMContext):
     delivery_type = callback.data[len("delivery_type_"):]
 
+    await state.update_data(delivery_type=delivery_type)
+
     if delivery_type == "delivery":
-        await state.update_data(delivery_type="delivery")
         await callback.message.edit_text("🏠 Укажите адрес доставки:")
         await state.set_state(UserStates.waiting_address)
-    elif delivery_type == "pickup":
-        await state.update_data(delivery_type="pickup", delivery_address=PICKUP_ADDRESS)
-        await callback.message.edit_text("Напишите комментарий к заказу (или «нет»):")
-        await state.set_state(UserStates.waiting_comment)
+    else:
+        await state.update_data(delivery_address=PICKUP_ADDRESS)
+
+        status_text = get_restaurant_status_text()
+        time_options = generate_time_options()
+        kb_rows = []
+        row = []
+        for label, time_str in time_options:
+            row.append(InlineKeyboardButton(text=label, callback_data=f"prep_time_{time_str}"))
+            if len(row) == 2:
+                kb_rows.append(row)
+                row = []
+        if row:
+            kb_rows.append(row)
+        kb_rows.append([InlineKeyboardButton(text="← Назад", callback_data="user_checkout")])
+        kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+        message_text = f"Выберите время готовности заказа:\n\n<i>{status_text}</i>"
+
+        await callback.message.edit_text(message_text, reply_markup=kb, parse_mode="HTML")
+        await state.set_state(UserStates.waiting_prep_time)
 
 
 @router.message(UserStates.waiting_address)
@@ -215,7 +284,33 @@ async def get_address(message: Message, state: FSMContext):
         return
 
     await state.update_data(delivery_address=address)
-    await message.answer("Напишите комментарий к заказу (или «нет»):")
+
+    status_text = get_restaurant_status_text()
+    time_options = generate_time_options()
+    kb_rows = []
+    row = []
+    for label, time_str in time_options:
+        row.append(InlineKeyboardButton(text=label, callback_data=f"prep_time_{time_str}"))
+        if len(row) == 2:
+            kb_rows.append(row)
+            row = []
+    if row:
+        kb_rows.append(row)
+    kb_rows.append([InlineKeyboardButton(text="← Назад", callback_data="user_checkout")])
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+    message_text = f"Выберите время готовности заказа:\n\n<i>{status_text}</i>"
+
+    await message.answer(message_text, reply_markup=kb, parse_mode="HTML")
+    await state.set_state(UserStates.waiting_prep_time)
+
+
+@router.callback_query(F.data.startswith("prep_time_"))
+async def process_prep_time(callback: CallbackQuery, state: FSMContext):
+    prep_time = callback.data[len("prep_time_"):]
+
+    await state.update_data(prep_time=prep_time)
+    await callback.message.edit_text("Напишите комментарий к заказу (или «нет»):")
     await state.set_state(UserStates.waiting_comment)
 
 
@@ -235,6 +330,7 @@ async def get_comment(message: Message, state: FSMContext, bot: Bot):
     phone = data["phone"]
     delivery_type = data.get("delivery_type", "delivery")
     delivery_address = data.get("delivery_address", "Не указан")
+    prep_time = data.get("prep_time", "Не указано")
     cart = data["cart"]
 
     total = sum(int(item["price"]) for item in cart)
@@ -257,26 +353,34 @@ async def get_comment(message: Message, state: FSMContext, bot: Bot):
 
     username = message.from_user.username or "Скрыт"
 
-    append_order(order_text, phone=phone, delivery_type=delivery_type, delivery_address=delivery_address, comment=comment, username=username)
+    append_order(order_text, phone=phone, delivery_type=delivery_type, delivery_address=delivery_address, comment=comment, username=username, prep_time=prep_time)
 
-    now = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
+    local_now = (datetime.datetime.utcnow() + LOCAL_TZ_OFFSET).strftime("%d.%m.%Y %H:%M")
+
+    # Определяем "СЕГОДНЯ"/"ЗАВТРА" для prep_time
+    prep_dt = datetime.datetime.strptime(prep_time, "%d.%m.%Y %H:%M")
+    local_today = (datetime.datetime.utcnow() + LOCAL_TZ_OFFSET).date()
+    day_label = "СЕГОДНЯ" if prep_dt.date() == local_today else "ЗАВТРА" if prep_dt.date() == local_today + datetime.timedelta(days=1) else ""
+    prep_time_with_day = f"<b>{day_label}</b> {prep_time}" if day_label else prep_time
 
     admin_notification = f"🍲 <b>Новый заказ — Сытный Дом</b>\n\n"
     admin_notification += f"📞 Телефон: {phone}\n"
     admin_notification += f"👤 Username: @{username}\n"
-    admin_notification += f"💬 Комментарий: {comment}\n\n"
+    admin_notification += f"💬 Комментарий: {comment}\n"
+    admin_notification += f"⏰ Готовность к: {prep_time_with_day}\n\n"
     if delivery_type == "delivery":
         admin_notification += f"🚚 <b>Доставка</b>\n📍 Адрес: {delivery_address}\n\n"
     else:
         admin_notification += f"🏃 <b>Самовывоз</b>\n📍 Адрес: {PICKUP_ADDRESS}\n\n"
     admin_notification += order_text + "\n"
-    admin_notification += f"🕒 Время: {now}"
+    admin_notification += f"🕒 Время оформления: {local_now}"
 
     for admin_id in ADMIN_IDS:
         await bot.send_message(admin_id, admin_notification, parse_mode="HTML")
 
     client_confirmation = "✅ <b>Спасибо за заказ!</b>\n\n"
     client_confirmation += order_text + "\n\n"
+    client_confirmation += f"⏰ Готовность к: {prep_time_with_day}\n"
     if delivery_type == "delivery":
         client_confirmation += f"🚚 <b>Доставка по адресу:</b>\n{delivery_address}\n\n"
     else:
@@ -287,7 +391,7 @@ async def get_comment(message: Message, state: FSMContext, bot: Bot):
     await state.clear()
 
 
-@router.message(Command("cancel"), (UserStates.waiting_delivery_type, UserStates.waiting_address, UserStates.waiting_comment))
+@router.message(Command("cancel"), (UserStates.waiting_delivery_type, UserStates.waiting_address, UserStates.waiting_comment, UserStates.waiting_prep_time))
 async def cancel_order(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Оформление заказа отменено.", reply_markup=ReplyKeyboardRemove())

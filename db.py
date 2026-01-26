@@ -4,6 +4,8 @@ import os
 
 DB_FILE = os.getenv("DB_FILE_PATH", "bot.db")
 
+# Часовой пояс ресторана: UTC+8 (Иркутск)
+LOCAL_TZ_OFFSET = datetime.timedelta(hours=8)
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -19,18 +21,17 @@ def init_db():
                     phone TEXT,
                     address TEXT,
                     username TEXT,
-                    comment TEXT)''')
+                    comment TEXT,
+                    delivery_type TEXT,
+                    delivery_address TEXT)''')
 
-    # Добавляем новые колонки, если их нет
+    # Добавляем колонку prep_time, если нет
     def column_exists(table, column):
         cur.execute(f"PRAGMA table_info({table})")
         return any(c[1] == column for c in cur.fetchall())
 
-    if not column_exists('orders', 'delivery_type'):
-        cur.execute("ALTER TABLE orders ADD COLUMN delivery_type TEXT")
-
-    if not column_exists('orders', 'delivery_address'):
-        cur.execute("ALTER TABLE orders ADD COLUMN delivery_address TEXT")
+    if not column_exists('orders', 'prep_time'):
+        cur.execute("ALTER TABLE orders ADD COLUMN prep_time TEXT")
 
     cur.execute('''CREATE TABLE IF NOT EXISTS categories
                    (id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,14 +84,16 @@ def write_menu(menu_list):
     conn.close()
 
 
-def append_order(order_text, phone=None, delivery_type=None, delivery_address=None, comment=None, username=None):
+def append_order(order_text, phone=None, delivery_type=None, delivery_address=None, comment=None, username=None, prep_time=None):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
-    now = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
+    # Время оформления — в местном часовом поясе (UTC+8)
+    local_now = datetime.datetime.utcnow() + LOCAL_TZ_OFFSET
+    local_time_str = local_now.strftime("%d.%m.%Y %H:%M")
     cur.execute("""INSERT INTO orders 
-                   (order_text, order_time, phone, delivery_type, delivery_address, comment, username) 
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (order_text, now, phone, delivery_type, delivery_address, comment, username))
+                   (order_text, order_time, phone, delivery_type, delivery_address, comment, username, prep_time) 
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (order_text, local_time_str, phone, delivery_type, delivery_address, comment, username, prep_time))
     conn.commit()
     conn.close()
 
@@ -118,22 +121,22 @@ def get_orders_filtered(period=None, date_from=None, date_to=None, limit=1000):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
 
-    query = """SELECT order_text, order_time, phone, delivery_address, username, comment, delivery_type 
+    query = """SELECT order_text, order_time, phone, delivery_address, username, comment, delivery_type, prep_time 
                FROM orders"""
     params = []
 
     where_clauses = []
 
     if period == "today":
-        today = datetime.date.today().strftime("%d.%m.%Y")
+        today = (datetime.datetime.utcnow() + LOCAL_TZ_OFFSET).strftime("%d.%m.%Y")
         where_clauses.append("order_time LIKE ?")
         params.append(f"{today}%")
     elif period == "3days":
-        since = (datetime.date.today() - datetime.timedelta(days=3)).strftime("%d.%m.%Y")
+        since = (datetime.datetime.utcnow() + LOCAL_TZ_OFFSET - datetime.timedelta(days=3)).strftime("%d.%m.%Y")
         where_clauses.append("order_time >= ?")
         params.append(f"{since} 00:00")
     elif period == "week":
-        since = (datetime.date.today() - datetime.timedelta(days=7)).strftime("%d.%m.%Y")
+        since = (datetime.datetime.utcnow() + LOCAL_TZ_OFFSET - datetime.timedelta(days=7)).strftime("%d.%m.%Y")
         where_clauses.append("order_time >= ?")
         params.append(f"{since} 00:00")
 
@@ -150,7 +153,8 @@ def get_orders_filtered(period=None, date_from=None, date_to=None, limit=1000):
     if where_clauses:
         query += " WHERE " + " AND ".join(where_clauses)
 
-    query += " ORDER BY id DESC LIMIT ?"
+    # Изменено: сортировка от старых к новым (ASC)
+    query += " ORDER BY id ASC LIMIT ?"
     params.append(limit)
 
     cur.execute(query, params)
@@ -158,7 +162,7 @@ def get_orders_filtered(period=None, date_from=None, date_to=None, limit=1000):
 
     orders = []
     for row in rows:
-        text, time_str, phone, delivery_address, username, comment, delivery_type = row
+        text, time_str, phone, delivery_address, username, comment, delivery_type, prep_time = row
         dt = None
         try:
             dt = datetime.datetime.strptime(time_str, "%d.%m.%Y %H:%M")
@@ -172,7 +176,8 @@ def get_orders_filtered(period=None, date_from=None, date_to=None, limit=1000):
             "delivery_address": delivery_address,
             "username": username,
             "comment": comment,
-            "delivery_type": delivery_type
+            "delivery_type": delivery_type,
+            "prep_time": prep_time or "Не указано"
         })
 
     conn.close()
