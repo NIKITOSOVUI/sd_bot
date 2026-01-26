@@ -1,0 +1,11 @@
+version: '3.9'
+
+services:
+  bot:
+    build: .
+    container_name: sd_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./bot.db:/sd_bot/bot.db   # БД сохраняется прямо в корне проекта на сервере
