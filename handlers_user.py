@@ -28,6 +28,17 @@ async def show_categories(msg_or_cb, state: FSMContext):
 
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
+    current_state = await state.get_state()
+
+    # Защита: если пользователь в процессе оформления — блокируем /start
+    if current_state in [
+        UserStates.waiting_delivery_type.state,
+        UserStates.waiting_address.state,
+        UserStates.waiting_comment.state
+    ]:
+        await message.answer("Вы сейчас оформляете заказ. Завершите оформление или напишите /cancel для отмены.")
+        return
+
     user_id = str(message.from_user.id)
     users = read_users()
 
@@ -195,7 +206,7 @@ async def process_delivery_type(callback: CallbackQuery, state: FSMContext):
 @router.message(UserStates.waiting_address)
 async def get_address(message: Message, state: FSMContext):
     if message.text.startswith("/"):
-        await message.answer("Во время оформления команды не поддерживаются. Введите адрес или напишите /cancel для отмены.")
+        await message.answer("Во время оформления заказа команды запрещены.\nВведите адрес доставки или напишите /cancel для отмены.")
         return
 
     address = message.text.strip()
@@ -213,7 +224,7 @@ async def get_comment(message: Message, state: FSMContext, bot: Bot):
     from config import ADMIN_IDS
 
     if message.text.startswith("/"):
-        await message.answer("Во время оформления команды не поддерживаются. Введите комментарий или напишите /cancel для отмены.")
+        await message.answer("Во время оформления заказа команды запрещены.\nВведите комментарий или напишите /cancel для отмены.")
         return
 
     comment = message.text.strip()
@@ -250,7 +261,6 @@ async def get_comment(message: Message, state: FSMContext, bot: Bot):
 
     now = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
 
-    # Уведомление только админам (детальное)
     admin_notification = f"🍲 <b>Новый заказ — Сытный Дом</b>\n\n"
     admin_notification += f"📞 Телефон: {phone}\n"
     admin_notification += f"👤 Username: @{username}\n"
@@ -265,7 +275,6 @@ async def get_comment(message: Message, state: FSMContext, bot: Bot):
     for admin_id in ADMIN_IDS:
         await bot.send_message(admin_id, admin_notification, parse_mode="HTML")
 
-    # Подтверждение только клиенту
     client_confirmation = "✅ <b>Спасибо за заказ!</b>\n\n"
     client_confirmation += order_text + "\n\n"
     if delivery_type == "delivery":
