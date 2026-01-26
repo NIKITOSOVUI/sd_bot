@@ -7,5 +7,7 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      - DB_FILE_PATH=/app/data/bot.db
     volumes:
-      - ./bot.db:/sd_bot/bot.db   # БД сохраняется прямо в корне проекта на сервере
+      - /root/sd_bot_db:/app/data

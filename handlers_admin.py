@@ -310,27 +310,24 @@ def format_order_block(order) -> str:
     time_str = order.get("time", "—")
     username = order.get("username", "Скрыт")
     phone = order.get("phone", "Не указан")
-    address = order.get("address", "Не указан")
+    delivery_type = order.get("delivery_type", "Не указан")
+    delivery_address = order.get("delivery_address", "Не указан")
     comment = order.get("comment", "Без комментария")
     text = order.get("text", "")
 
-    # Если поля NULL (старые заказы), пытаемся спарсить из text
-    if phone == "Не указан" or address == "Не указан" or comment == "Без комментария":
-        lines = text.split("\n")
-        for line in lines:
-            line = line.strip()
-            if line.startswith("Телефон:"):
-                phone = line.split(":", 1)[1].strip()
-            elif line.startswith("Адрес доставки:"):
-                address = line.split(":", 1)[1].strip()
-            elif line.startswith("Комментарий:"):
-                comment = line.split(":", 1)[1].strip()
-
-    # Формируем читаемый вывод
     result = [
         f"<b>{time_str} (@{username})</b>",
         f"📞 {phone}",
-        f"📍 {address}",
+    ]
+
+    if delivery_type == "delivery":
+        result.append(f"🚚 Доставка: {delivery_address}")
+    elif delivery_type == "pickup":
+        result.append(f"🏃 Самовывоз: {delivery_address}")
+    else:
+        result.append(f"Тип получения: {delivery_type}\nАдрес: {delivery_address}")
+
+    result += [
         f"💬 {comment}",
         "",
         text if text else "(Состав заказа не указан)",

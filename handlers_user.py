@@ -1,5 +1,5 @@
 from aiogram import Router, F, Bot
-from aiogram.types import Message, CallbackQuery, Contact, ReplyKeyboardRemove, FSInputFile
+from aiogram.types import Message, CallbackQuery, Contact, ReplyKeyboardRemove, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from db import read_menu, append_order, read_users, write_users
@@ -10,6 +10,8 @@ import datetime
 from collections import defaultdict
 
 router = Router()
+
+PICKUP_ADDRESS = "Братск, Центральный р-н, ул. Коммунальная, 15Б"
 
 
 async def show_categories(msg_or_cb, state: FSMContext):
@@ -29,19 +31,18 @@ async def cmd_start(message: Message, state: FSMContext):
     user_id = str(message.from_user.id)
     users = read_users()
 
-    # Отправка приветственного фото
     if WELCOME_PHOTO_PATH:
         try:
             if WELCOME_PHOTO_PATH.startswith(("http://", "https://")):
                 if WELCOME_PHOTO_PATH.startswith("http://"):
-                    print(f"Ошибка: http URL не поддерживается Telegram. Используйте https. Путь: {WELCOME_PHOTO_PATH}")
+                    print(f"Ошибка: http URL не поддерживается Telegram. Используйте https.")
                 else:
                     await message.answer_photo(photo=WELCOME_PHOTO_PATH)
             else:
                 photo = FSInputFile(WELCOME_PHOTO_PATH)
                 await message.answer_photo(photo=photo)
         except FileNotFoundError:
-            print(f"Ошибка: файл фото не найден по пути '{WELCOME_PHOTO_PATH}'.")
+            print(f"Файл фото не найден: {WELCOME_PHOTO_PATH}")
         except Exception as e:
             print(f"Ошибка отправки фото: {e}")
 
@@ -95,7 +96,7 @@ async def select_category(callback: CallbackQuery, state: FSMContext):
 
     await state.update_data(current_category=category, current_items=items)
 
-    text = f"<b>{category}</b>\n\n\n"  # Без эмодзи
+    text = f"<b>{category}</b>\n\n\n"
 
     for num, item in enumerate(items, 1):
         desc = f"\n{item.get('desc', '')}" if item.get('desc') else ""
@@ -151,7 +152,7 @@ async def show_cart(callback: CallbackQuery, state: FSMContext):
     text = "🛒 <b>Ваша корзина</b>\n\n"
 
     for cat, citems in grouped.items():
-        text += f"<b>{cat}</b>\n"  # Без эмодзи
+        text += f"<b>{cat}</b>\n"
 
         for item in citems:
             desc = item.get('desc', '').strip()
@@ -168,18 +169,41 @@ async def show_cart(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "user_checkout")
 async def checkout(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("🏠 Укажите адрес доставки:")
-    await state.set_state(UserStates.waiting_address)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚚 Доставка", callback_data="delivery_type_delivery")],
+        [InlineKeyboardButton(text="🏃 Самовывоз", callback_data="delivery_type_pickup")],
+        [InlineKeyboardButton(text="← Назад", callback_data="user_cart")]
+    ])
+    await callback.message.edit_text("Выберите способ получения заказа:", reply_markup=kb)
+    await state.set_state(UserStates.waiting_delivery_type)
+
+
+@router.callback_query(F.data.startswith("delivery_type_"))
+async def process_delivery_type(callback: CallbackQuery, state: FSMContext):
+    delivery_type = callback.data[len("delivery_type_"):]
+
+    if delivery_type == "delivery":
+        await state.update_data(delivery_type="delivery")
+        await callback.message.edit_text("🏠 Укажите адрес доставки:")
+        await state.set_state(UserStates.waiting_address)
+    elif delivery_type == "pickup":
+        await state.update_data(delivery_type="pickup", delivery_address=PICKUP_ADDRESS)
+        await callback.message.edit_text("Напишите комментарий к заказу (или «нет»):")
+        await state.set_state(UserStates.waiting_comment)
 
 
 @router.message(UserStates.waiting_address)
 async def get_address(message: Message, state: FSMContext):
-    address = message.text.strip()
-    if not address:
-        await message.answer("Адрес не может быть пустым. Пожалуйста, укажите адрес доставки:")
+    if message.text.startswith("/"):
+        await message.answer("Во время оформления команды не поддерживаются. Введите адрес или напишите /cancel для отмены.")
         return
 
-    await state.update_data(address=address)
+    address = message.text.strip()
+    if not address:
+        await message.answer("Адрес не может быть пустым. Повторите ввод:")
+        return
+
+    await state.update_data(delivery_address=address)
     await message.answer("Напишите комментарий к заказу (или «нет»):")
     await state.set_state(UserStates.waiting_comment)
 
@@ -188,13 +212,18 @@ async def get_address(message: Message, state: FSMContext):
 async def get_comment(message: Message, state: FSMContext, bot: Bot):
     from config import ADMIN_IDS
 
+    if message.text.startswith("/"):
+        await message.answer("Во время оформления команды не поддерживаются. Введите комментарий или напишите /cancel для отмены.")
+        return
+
     comment = message.text.strip()
     if comment.lower() == "нет":
         comment = "Без комментария"
 
     data = await state.get_data()
     phone = data["phone"]
-    address = data.get("address", "не указан")
+    delivery_type = data.get("delivery_type", "delivery")
+    delivery_address = data.get("delivery_address", "Не указан")
     cart = data["cart"]
 
     total = sum(int(item["price"]) for item in cart)
@@ -205,7 +234,7 @@ async def get_comment(message: Message, state: FSMContext, bot: Bot):
         grouped[item["category"]].append(item)
 
     for cat, items in grouped.items():
-        order_text += f"<b>{cat}</b>\n"  # Без эмодзи
+        order_text += f"<b>{cat}</b>\n"
         for item in items:
             desc = item.get('desc', '').strip()
             order_text += f"• {item['name']} — {item['price']} ₽\n"
@@ -217,22 +246,43 @@ async def get_comment(message: Message, state: FSMContext, bot: Bot):
 
     username = message.from_user.username or "Скрыт"
 
-    append_order(order_text, phone=phone, address=address, comment=comment, username=username)
+    append_order(order_text, phone=phone, delivery_type=delivery_type, delivery_address=delivery_address, comment=comment, username=username)
 
     now = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    # Уведомление админу
     full_text = f"🍲 <b>Новый заказ — Сытный Дом</b>\n\n"
-    full_text += order_text + "\n\n"
-    full_text += f"📞 Телефон: {phone}\n\n"
-    full_text += f"📍 Адрес доставки: {address}\n"
-    full_text += f"💬 Комментарий: {comment}\n"
-    full_text += f"👤 Юзернейм: @{username}\n\n"
+    full_text += f"📞 Телефон: {phone}\n"
+    full_text += f"👤 Username: @{username}\n"
+    full_text += f"💬 Комментарий: {comment}\n\n"
+    if delivery_type == "delivery":
+        full_text += f"🚚 <b>Доставка</b>\n📍 Адрес: {delivery_address}\n\n"
+    else:
+        full_text += f"🏃 <b>Самовывоз</b>\n📍 Адрес: {PICKUP_ADDRESS}\n\n"
+    full_text += order_text + "\n"
     full_text += f"🕒 Время: {now}"
 
     for admin_id in ADMIN_IDS:
         await bot.send_message(admin_id, full_text, parse_mode="HTML")
 
-    await message.answer("Заказ отправлен! Скоро свяжемся. Спасибо! 🍲")
+    # Подтверждение пользователю
+    confirm_text = "✅ <b>Спасибо за заказ!</b>\n\n"
+    confirm_text += order_text + "\n\n"
+    if delivery_type == "delivery":
+        confirm_text += f"🚚 <b>Доставка по адресу:</b>\n{delivery_address}\n\n"
+    else:
+        confirm_text += f"🏃 <b>Самовывоз по адресу:</b>\n{PICKUP_ADDRESS}\n\n"
+    confirm_text += "Мы свяжемся с вами в ближайшее время для подтверждения. Приятного аппетита! 🍲"
+
+    await message.answer(confirm_text, parse_mode="HTML")
     await state.clear()
+
+
+@router.message(Command("cancel"), (UserStates.waiting_delivery_type, UserStates.waiting_address, UserStates.waiting_comment))
+async def cancel_order(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Оформление заказа отменено.", reply_markup=ReplyKeyboardRemove())
+    await show_categories(message, state)
 
 
 @router.callback_query(F.data == "user_clear_cart")

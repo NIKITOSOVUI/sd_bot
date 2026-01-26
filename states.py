@@ -2,9 +2,10 @@ from aiogram.fsm.state import State, StatesGroup
 
 
 class UserStates(StatesGroup):
-    waiting_phone = State()       # ожидание отправки номера телефона
-    waiting_address = State()     # ожидание ввода адреса доставки
-    waiting_comment = State()     # ожидание комментария к заказу
+    waiting_phone = State()
+    waiting_delivery_type = State()  # Новый: выбор доставки/самовывоза
+    waiting_address = State()
+    waiting_comment = State()
 
 
 class AdminStates(StatesGroup):

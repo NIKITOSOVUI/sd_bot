@@ -14,24 +14,22 @@ def init_db():
     cur.execute('''CREATE TABLE IF NOT EXISTS orders
                    (id INTEGER PRIMARY KEY AUTOINCREMENT,
                     order_text TEXT,
-                    order_time TEXT)''')
+                    order_time TEXT,
+                    phone TEXT,
+                    address TEXT,
+                    username TEXT,
+                    comment TEXT)''')
 
-    # Проверка и добавление новых колонок
+    # Добавляем новые колонки, если их нет
     def column_exists(table, column):
         cur.execute(f"PRAGMA table_info({table})")
         return any(c[1] == column for c in cur.fetchall())
 
-    if not column_exists('orders', 'phone'):
-        cur.execute("ALTER TABLE orders ADD COLUMN phone TEXT")
+    if not column_exists('orders', 'delivery_type'):
+        cur.execute("ALTER TABLE orders ADD COLUMN delivery_type TEXT")
 
-    if not column_exists('orders', 'address'):
-        cur.execute("ALTER TABLE orders ADD COLUMN address TEXT")
-
-    if not column_exists('orders', 'username'):
-        cur.execute("ALTER TABLE orders ADD COLUMN username TEXT")
-
-    if not column_exists('orders', 'comment'):
-        cur.execute("ALTER TABLE orders ADD COLUMN comment TEXT")
+    if not column_exists('orders', 'delivery_address'):
+        cur.execute("ALTER TABLE orders ADD COLUMN delivery_address TEXT")
 
     cur.execute('''CREATE TABLE IF NOT EXISTS categories
                    (id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,12 +82,14 @@ def write_menu(menu_list):
     conn.close()
 
 
-def append_order(order_text, phone=None, address=None, comment=None, username=None):
+def append_order(order_text, phone=None, delivery_type=None, delivery_address=None, comment=None, username=None):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
     now = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
-    cur.execute("INSERT INTO orders (order_text, order_time, phone, address, comment, username) VALUES (?, ?, ?, ?, ?, ?)",
-                (order_text, now, phone, address, comment, username))
+    cur.execute("""INSERT INTO orders 
+                   (order_text, order_time, phone, delivery_type, delivery_address, comment, username) 
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (order_text, now, phone, delivery_type, delivery_address, comment, username))
     conn.commit()
     conn.close()
 
@@ -114,15 +114,11 @@ def write_users(users_dict):
 
 
 def get_orders_filtered(period=None, date_from=None, date_to=None, limit=1000):
-    """
-    Возвращает список заказов с фильтром.
-    period: 'today', '3days', 'week', None
-    date_from / date_to: строки в формате "DD.MM.YYYY"
-    """
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
 
-    query = "SELECT order_text, order_time, phone, address, username, comment FROM orders"
+    query = """SELECT order_text, order_time, phone, delivery_address, username, comment, delivery_type 
+               FROM orders"""
     params = []
 
     where_clauses = []
@@ -161,7 +157,7 @@ def get_orders_filtered(period=None, date_from=None, date_to=None, limit=1000):
 
     orders = []
     for row in rows:
-        text, time_str, phone, address, username, comment = row
+        text, time_str, phone, delivery_address, username, comment, delivery_type = row
         dt = None
         try:
             dt = datetime.datetime.strptime(time_str, "%d.%m.%Y %H:%M")
@@ -172,9 +168,10 @@ def get_orders_filtered(period=None, date_from=None, date_to=None, limit=1000):
             "time": time_str,
             "datetime": dt,
             "phone": phone,
-            "address": address,
+            "delivery_address": delivery_address,
             "username": username,
-            "comment": comment
+            "comment": comment,
+            "delivery_type": delivery_type
         })
 
     conn.close()
