@@ -250,31 +250,31 @@ async def get_comment(message: Message, state: FSMContext, bot: Bot):
 
     now = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
 
-    # Уведомление админу
-    full_text = f"🍲 <b>Новый заказ — Сытный Дом</b>\n\n"
-    full_text += f"📞 Телефон: {phone}\n"
-    full_text += f"👤 Username: @{username}\n"
-    full_text += f"💬 Комментарий: {comment}\n\n"
+    # Уведомление только админам (детальное)
+    admin_notification = f"🍲 <b>Новый заказ — Сытный Дом</b>\n\n"
+    admin_notification += f"📞 Телефон: {phone}\n"
+    admin_notification += f"👤 Username: @{username}\n"
+    admin_notification += f"💬 Комментарий: {comment}\n\n"
     if delivery_type == "delivery":
-        full_text += f"🚚 <b>Доставка</b>\n📍 Адрес: {delivery_address}\n\n"
+        admin_notification += f"🚚 <b>Доставка</b>\n📍 Адрес: {delivery_address}\n\n"
     else:
-        full_text += f"🏃 <b>Самовывоз</b>\n📍 Адрес: {PICKUP_ADDRESS}\n\n"
-    full_text += order_text + "\n"
-    full_text += f"🕒 Время: {now}"
+        admin_notification += f"🏃 <b>Самовывоз</b>\n📍 Адрес: {PICKUP_ADDRESS}\n\n"
+    admin_notification += order_text + "\n"
+    admin_notification += f"🕒 Время: {now}"
 
     for admin_id in ADMIN_IDS:
-        await bot.send_message(admin_id, full_text, parse_mode="HTML")
+        await bot.send_message(admin_id, admin_notification, parse_mode="HTML")
 
-    # Подтверждение пользователю
-    confirm_text = "✅ <b>Спасибо за заказ!</b>\n\n"
-    confirm_text += order_text + "\n\n"
+    # Подтверждение только клиенту
+    client_confirmation = "✅ <b>Спасибо за заказ!</b>\n\n"
+    client_confirmation += order_text + "\n\n"
     if delivery_type == "delivery":
-        confirm_text += f"🚚 <b>Доставка по адресу:</b>\n{delivery_address}\n\n"
+        client_confirmation += f"🚚 <b>Доставка по адресу:</b>\n{delivery_address}\n\n"
     else:
-        confirm_text += f"🏃 <b>Самовывоз по адресу:</b>\n{PICKUP_ADDRESS}\n\n"
-    confirm_text += "Мы свяжемся с вами в ближайшее время для подтверждения. Приятного аппетита! 🍲"
+        client_confirmation += f"🏃 <b>Самовывоз по адресу:</b>\n{PICKUP_ADDRESS}\n\n"
+    client_confirmation += "Мы свяжемся с вами в ближайшее время для подтверждения. Приятного аппетита! 🍲"
 
-    await message.answer(confirm_text, parse_mode="HTML")
+    await message.answer(client_confirmation, parse_mode="HTML")
     await state.clear()
 
 
