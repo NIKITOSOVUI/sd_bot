@@ -4,9 +4,12 @@ from aiogram.fsm.state import State, StatesGroup
 class UserStates(StatesGroup):
     waiting_phone = State()
     waiting_delivery_type = State()
+    waiting_address_choice = State()  # Новый: выбор из сохранённых или новый
     waiting_address = State()
+    waiting_prep_time = State()
+    waiting_payment_method = State()
+    waiting_cash_amount = State()
     waiting_comment = State()
-    waiting_prep_time = State()  # Новое состояние для выбора времени готовности
 
 
 class AdminStates(StatesGroup):

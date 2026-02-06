@@ -1,6 +1,7 @@
 import sqlite3
 import datetime
 import os
+import json
 
 DB_FILE = os.getenv("DB_FILE_PATH", "bot.db")
 
@@ -12,7 +13,7 @@ def init_db():
     cur = conn.cursor()
 
     cur.execute('''CREATE TABLE IF NOT EXISTS users
-                   (user_id TEXT PRIMARY KEY, phone TEXT)''')
+                   (user_id TEXT PRIMARY KEY, phone TEXT, addresses TEXT)''')  # Добавлена колонка addresses
 
     cur.execute('''CREATE TABLE IF NOT EXISTS orders
                    (id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -25,13 +26,24 @@ def init_db():
                     delivery_type TEXT,
                     delivery_address TEXT)''')
 
-    # Добавляем колонку prep_time, если нет
     def column_exists(table, column):
         cur.execute(f"PRAGMA table_info({table})")
         return any(c[1] == column for c in cur.fetchall())
 
     if not column_exists('orders', 'prep_time'):
         cur.execute("ALTER TABLE orders ADD COLUMN prep_time TEXT")
+
+    if not column_exists('orders', 'delivery_cost'):
+        cur.execute("ALTER TABLE orders ADD COLUMN delivery_cost INTEGER DEFAULT 0")
+
+    if not column_exists('orders', 'payment_method'):
+        cur.execute("ALTER TABLE orders ADD COLUMN payment_method TEXT")
+
+    if not column_exists('orders', 'cash_amount'):
+        cur.execute("ALTER TABLE orders ADD COLUMN cash_amount INTEGER")
+
+    if not column_exists('users', 'addresses'):
+        cur.execute("ALTER TABLE users ADD COLUMN addresses TEXT DEFAULT '[]'")
 
     cur.execute('''CREATE TABLE IF NOT EXISTS categories
                    (id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,6 +57,26 @@ def init_db():
                     desc TEXT,
                     FOREIGN KEY (category_id) REFERENCES categories (id))''')
 
+    conn.commit()
+    conn.close()
+
+
+def get_user_addresses(user_id: str):
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("SELECT addresses FROM users WHERE user_id = ?", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    if row and row[0]:
+        return json.loads(row[0])
+    return []
+
+
+def save_user_addresses(user_id: str, addresses: list):
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    addresses_json = json.dumps(addresses)
+    cur.execute("INSERT OR REPLACE INTO users (user_id, addresses) VALUES (?, ?)", (user_id, addresses_json))
     conn.commit()
     conn.close()
 
@@ -84,16 +116,15 @@ def write_menu(menu_list):
     conn.close()
 
 
-def append_order(order_text, phone=None, delivery_type=None, delivery_address=None, comment=None, username=None, prep_time=None):
+def append_order(order_text, phone=None, delivery_type=None, delivery_address=None, comment=None, username=None, prep_time=None, delivery_cost=0, payment_method=None, cash_amount=None):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
-    # Время оформления — в местном часовом поясе (UTC+8)
     local_now = datetime.datetime.utcnow() + LOCAL_TZ_OFFSET
     local_time_str = local_now.strftime("%d.%m.%Y %H:%M")
     cur.execute("""INSERT INTO orders 
-                   (order_text, order_time, phone, delivery_type, delivery_address, comment, username, prep_time) 
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (order_text, local_time_str, phone, delivery_type, delivery_address, comment, username, prep_time))
+                   (order_text, order_time, phone, delivery_type, delivery_address, comment, username, prep_time, delivery_cost, payment_method, cash_amount) 
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (order_text, local_time_str, phone, delivery_type, delivery_address, comment, username, prep_time, delivery_cost, payment_method, cash_amount))
     conn.commit()
     conn.close()
 
@@ -121,7 +152,7 @@ def get_orders_filtered(period=None, date_from=None, date_to=None, limit=1000):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
 
-    query = """SELECT order_text, order_time, phone, delivery_address, username, comment, delivery_type, prep_time 
+    query = """SELECT order_text, order_time, phone, delivery_address, username, comment, delivery_type, prep_time, delivery_cost, payment_method, cash_amount 
                FROM orders"""
     params = []
 
@@ -153,7 +184,6 @@ def get_orders_filtered(period=None, date_from=None, date_to=None, limit=1000):
     if where_clauses:
         query += " WHERE " + " AND ".join(where_clauses)
 
-    # Изменено: сортировка от старых к новым (ASC)
     query += " ORDER BY id ASC LIMIT ?"
     params.append(limit)
 
@@ -162,7 +192,7 @@ def get_orders_filtered(period=None, date_from=None, date_to=None, limit=1000):
 
     orders = []
     for row in rows:
-        text, time_str, phone, delivery_address, username, comment, delivery_type, prep_time = row
+        text, time_str, phone, delivery_address, username, comment, delivery_type, prep_time, delivery_cost, payment_method, cash_amount = row
         dt = None
         try:
             dt = datetime.datetime.strptime(time_str, "%d.%m.%Y %H:%M")
@@ -177,7 +207,10 @@ def get_orders_filtered(period=None, date_from=None, date_to=None, limit=1000):
             "username": username,
             "comment": comment,
             "delivery_type": delivery_type,
-            "prep_time": prep_time or "Не указано"
+            "prep_time": prep_time or "Не указано",
+            "delivery_cost": delivery_cost or 0,
+            "payment_method": payment_method or "Не указано",
+            "cash_amount": cash_amount
         })
 
     conn.close()

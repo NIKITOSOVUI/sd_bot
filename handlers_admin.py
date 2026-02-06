@@ -3,13 +3,12 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
+from db import LOCAL_TZ_OFFSET
 
 from db import read_menu, write_menu, get_orders_filtered
 from keyboards import admin_main_kb, admin_categories_kb
 from states import AdminStates
 from config import ADMIN_IDS
-
-from db import LOCAL_TZ_OFFSET
 
 import datetime
 
@@ -21,16 +20,22 @@ async def is_admin(user_id: int) -> bool:
 
 
 @router.message(Command("admin"))
-async def admin_panel(message: Message):
+async def admin_panel(message: Message, state: FSMContext):
     if not await is_admin(message.from_user.id):
         return
+
+    await state.clear()  # Очищаем состояние при входе
+
     await message.answer("Админ-панель — Сытный Дом", reply_markup=admin_main_kb())
 
 
 @router.callback_query(F.data == "admin_back")
-async def admin_back(callback: CallbackQuery):
+async def admin_back(callback: CallbackQuery, state: FSMContext):
     if not await is_admin(callback.from_user.id):
         return
+
+    await state.clear()  # Очищаем состояние при возврате
+
     await callback.message.edit_text("Админ-панель — Сытный Дом", reply_markup=admin_main_kb())
 
 
@@ -318,7 +323,7 @@ def format_order_block(order) -> str:
     prep_time = order.get("prep_time", "Не указано")
     text = order.get("text", "")
 
-    # Добавляем <b>СЕГОДНЯ</b>/<b>ЗАВТРА</b> перед временем
+    # "СЕГОДНЯ"/"ЗАВТРА" для prep_time
     if prep_time != "Не указано":
         try:
             prep_dt = datetime.datetime.strptime(prep_time, "%d.%m.%Y %H:%M")
@@ -575,6 +580,8 @@ async def process_orders_pagination(callback: CallbackQuery, state: FSMContext):
 async def back_to_orders_filter(callback: CallbackQuery, state: FSMContext):
     if not await is_admin(callback.from_user.id):
         return
+
+    await state.clear()  # Очищаем состояние при возврате к выбору периода
 
     text = "<b>Просмотр заказов</b>\n\nВыберите период:"
     kb = get_orders_filter_kb()

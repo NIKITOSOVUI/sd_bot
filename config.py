@@ -12,3 +12,4 @@ ADMIN_IDS: List[int] = [int(x.strip()) for x in ADMIN_IDS_STR.split(",") if x.st
 print(ADMIN_IDS)
 
 WELCOME_PHOTO_PATH = "png/logo.jpg"  
+    
