@@ -72,11 +72,25 @@ def get_user_addresses(user_id: str):
     return []
 
 
+def save_user_phone(user_id: str, phone: str):
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO users (user_id, phone) VALUES (?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET phone = excluded.phone
+    """, (user_id, phone))
+    conn.commit()
+    conn.close()
+
+
 def save_user_addresses(user_id: str, addresses: list):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
-    addresses_json = json.dumps(addresses)
-    cur.execute("INSERT OR REPLACE INTO users (user_id, addresses) VALUES (?, ?)", (user_id, addresses_json))
+    addresses_json = json.dumps(addresses, ensure_ascii=False)
+    cur.execute("""
+        INSERT INTO users (user_id, addresses) VALUES (?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET addresses = excluded.addresses
+    """, (user_id, addresses_json))
     conn.commit()
     conn.close()
 
@@ -116,15 +130,24 @@ def write_menu(menu_list):
     conn.close()
 
 
-def append_order(order_text, phone=None, delivery_type=None, delivery_address=None, comment=None, username=None, prep_time=None, delivery_cost=0, payment_method=None, cash_amount=None):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    local_now = datetime.datetime.utcnow() + LOCAL_TZ_OFFSET
-    local_time_str = local_now.strftime("%d.%m.%Y %H:%M")
-    cur.execute("""INSERT INTO orders 
-                   (order_text, order_time, phone, delivery_type, delivery_address, comment, username, prep_time, delivery_cost, payment_method, cash_amount) 
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (order_text, local_time_str, phone, delivery_type, delivery_address, comment, username, prep_time, delivery_cost, payment_method, cash_amount))
+def append_order(order_text: str, phone: str, delivery_type: str, delivery_address: str,
+                comment: str = "Без комментария", username: str = "Скрыт",
+                prep_time: str = "Не указано", delivery_cost: int = 0,
+                payment_method: str = "Не указано", cash_amount: int | None = None,
+                user_id: str | None = None):  # новый параметр
+    conn = sqlite3.connect('bot.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        INSERT INTO orders 
+        (order_text, phone, delivery_type, delivery_address, comment, username, 
+         prep_time, delivery_cost, payment_method, cash_amount, user_id, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    ''', (
+        order_text, phone, delivery_type, delivery_address, comment, username,
+        prep_time, delivery_cost, payment_method, cash_amount, user_id
+    ))
+    
     conn.commit()
     conn.close()
 
@@ -136,16 +159,6 @@ def read_users():
     users = {row[0]: row[1] for row in cur.fetchall()}
     conn.close()
     return users
-
-
-def write_users(users_dict):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("DELETE FROM users")
-    for user_id, phone in users_dict.items():
-        cur.execute("INSERT INTO users (user_id, phone) VALUES (?, ?)", (user_id, phone))
-    conn.commit()
-    conn.close()
 
 
 def get_orders_filtered(period=None, date_from=None, date_to=None, limit=1000):
@@ -215,3 +228,55 @@ def get_orders_filtered(period=None, date_from=None, date_to=None, limit=1000):
 
     conn.close()
     return orders
+
+def get_user_orders(user_id: str):
+    conn = sqlite3.connect('bot.db')
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT prep_time, order_text, datetime(timestamp, '+8 hours') as local_time
+        FROM orders
+        WHERE user_id = ?
+        ORDER BY timestamp DESC
+        LIMIT 10
+    """, (user_id,))
+    rows = cursor.fetchall()
+    orders = []
+    for row in rows:
+        timestamp_str = "Неизвестно"
+        if row[2]:  # если timestamp не NULL
+            try:
+                # ← ИСПРАВЛЕНО: datetime.datetime.strptime
+                timestamp_dt = datetime.datetime.strptime(row[2], "%Y-%m-%d %H:%M:%S")
+                timestamp_str = timestamp_dt.strftime("%d.%m.%Y %H:%M")
+            except ValueError:
+                timestamp_str = "Ошибка формата"
+
+        orders.append({
+            'prep_time': row[0] or "Не указано",
+            'order_text': row[1],
+            'timestamp': timestamp_str
+        })
+    conn.close()
+    return orders
+
+
+def migrate_db():
+    conn = sqlite3.connect('bot.db')
+    cursor = conn.cursor()
+    
+    # Получаем список существующих колонок
+    cursor.execute("PRAGMA table_info(orders)")
+    columns = [info[1] for info in cursor.fetchall()]
+    
+    # Добавляем timestamp БЕЗ дефолта (он будет заполняться явно в INSERT)
+    if 'timestamp' not in columns:
+        cursor.execute("ALTER TABLE orders ADD COLUMN timestamp DATETIME")
+        print("Добавлена колонка timestamp в таблицу orders (без дефолта)")
+    
+    # Добавляем user_id БЕЗ дефолта
+    if 'user_id' not in columns:
+        cursor.execute("ALTER TABLE orders ADD COLUMN user_id TEXT")
+        print("Добавлена колонка user_id в таблицу orders")
+    
+    conn.commit()
+    conn.close()

@@ -3,7 +3,7 @@ from aiogram.types import Message, CallbackQuery, Contact, ReplyKeyboardRemove, 
 from aiogram.filters import Command
 from aiogram.filters.logic import or_f
 from aiogram.fsm.context import FSMContext
-from db import read_menu, append_order, read_users, write_users, get_user_addresses, save_user_addresses
+from db import read_menu, append_order, read_users, save_user_phone, get_user_addresses, save_user_addresses, get_user_orders
 from keyboards import phone_kb, categories_kb, category_kb, cart_kb
 from states import UserStates
 from config import WELCOME_PHOTO_PATH
@@ -26,26 +26,26 @@ ORDER_START_HOUR = 10
 ORDER_END_HOUR = 20
 TIME_STEP_MINUTES = 30
 
+ORDER_END_TIME = datetime.time(20, 30)  # ← НОВОЕ: заказы принимаются до 20:30
+PICKUP_ORDER_END_TIME = datetime.time(20, 45)  # ← НОВОЕ: для самовывоза заказы (и "Ближайшее время") до 20:45
+
+# Минимальное время подготовки
+PICKUP_PREPARE_MINUTES = 30   # для самовывоза
+DELIVERY_PREPARE_MINUTES = 60  # для доставки — через час
+
 # Стоимость доставки
 FREE_DELIVERY_MIN = 1500
 DELIVERY_COST = 250
 MIN_ORDER_FOR_DELIVERY = 300
 
 
-def generate_time_options():
+def generate_time_options(min_delay_minutes: int = PICKUP_PREPARE_MINUTES):
     utc_now = datetime.datetime.utcnow()
     local_now = utc_now + LOCAL_TZ_OFFSET
-    local_time = local_now.time()
     local_date = local_now.date()
 
-    # Определяем базу: если после 21:00 — завтра, иначе сегодня
-    if local_time >= RESTAURANT_CLOSE:
-        base_date = local_date + datetime.timedelta(days=1)
-    else:
-        base_date = local_date
-
-    # Минимальное время: +30 мин от текущего, округление вверх до 30 мин
-    min_time = local_now + datetime.timedelta(minutes=30)
+    # Минимальное время: текущее + delay, округление вверх до 30 мин
+    min_time = local_now + datetime.timedelta(minutes=min_delay_minutes)
     min_time = min_time.replace(second=0, microsecond=0)
 
     extra_minutes = min_time.minute % TIME_STEP_MINUTES
@@ -55,19 +55,32 @@ def generate_time_options():
     if min_time.minute == 60:
         min_time = min_time.replace(minute=0) + datetime.timedelta(hours=1)
 
-    # Если min_time раньше 10:00 сегодня — 10:00 сегодня
-    if base_date == local_date and min_time.time() < datetime.time(ORDER_START_HOUR, 0):
+    # Всегда корректируем на окно заказов: не раньше 10:00, не позже 20:30
+    start_time = datetime.time(ORDER_START_HOUR, 0)
+    end_time_limit = datetime.time(ORDER_END_HOUR, 30)
+
+    # Если слишком рано — ставим 10:00 той же даты
+    if min_time.time() < start_time:
         min_time = min_time.replace(hour=ORDER_START_HOUR, minute=0)
 
-    # Если min_time после 20:30 — переносим на завтра 10:00
-    if min_time.time() > datetime.time(ORDER_END_HOUR, 30):
-        min_time = datetime.datetime.combine(local_date + datetime.timedelta(days=1), datetime.time(ORDER_START_HOUR, 0))
+    # Если слишком поздно — перенос на следующий день 10:00
+    if min_time.time() > end_time_limit:
+        min_time = min_time + datetime.timedelta(days=1)
+        min_time = min_time.replace(hour=ORDER_START_HOUR, minute=0)
 
-    # Генерируем слоты начиная от min_time до 20:30
+    # Определяем дату для слотов и end_time
+    slots_date = min_time.date()
+    end_time = datetime.datetime.combine(slots_date, end_time_limit)
+
+    # Если после всех корректировок min_time > end_time — перенос на следующий день
+    if min_time > end_time:
+        slots_date += datetime.timedelta(days=1)
+        min_time = datetime.datetime.combine(slots_date, datetime.time(ORDER_START_HOUR, 0))
+        end_time = datetime.datetime.combine(slots_date, end_time_limit)
+
+    # Генерируем слоты
     options = []
     current = min_time
-    end_time = datetime.datetime.combine(current.date(), datetime.time(ORDER_END_HOUR, 30))
-
     while current <= end_time:
         time_str = current.strftime("%d.%m.%Y %H:%M")
         label = current.strftime("%H:%M")
@@ -85,7 +98,10 @@ def get_restaurant_status_text():
     local_time = local_now.time()
 
     if RESTAURANT_OPEN <= local_time < RESTAURANT_CLOSE:
-        return "🟢 Ресторан сейчас открыт (до 21:00)"
+        if local_time >= ORDER_END_TIME:
+            return "🟢 Ресторан сейчас открыт (до 21:00), но заказы принимаются только до 20:30. Ваш заказ будет на завтра."
+        else:
+            return "🟢 Ресторан сейчас открыт (до 21:00)"
     else:
         next_date = (local_now + datetime.timedelta(days=1)).strftime("%d.%m") if local_time >= RESTAURANT_CLOSE else local_now.strftime("%d.%m")
         return f"🔴 Ресторан сейчас закрыт (откроется в 9:00). Заказ будет оформлен на {next_date}."
@@ -172,19 +188,47 @@ async def cmd_start(message: Message, state: FSMContext):
 
 @router.message(F.contact, UserStates.waiting_phone)
 async def get_phone(message: Message, state: FSMContext):
-    phone = message.contact.phone_number
+    phone_raw = message.contact.phone_number  # например "+79016406231" или "89016406231"
+    phone_clean = phone_raw.lstrip('+')  # убираем +
+    if phone_clean.startswith('8'):
+        phone_clean = '7' + phone_clean[1:]  # заменяем 8 на 7
+    
     user_id = str(message.from_user.id)
     
     users = read_users()
-    users[user_id] = phone
-    write_users(users)
+    users[user_id] = phone_clean  # сохраняем чистые цифры "79016406231"
+    save_user_phone(users, phone_clean)
     
-    await state.update_data(phone=phone, cart=[])
+    await state.update_data(phone=phone_clean, cart=[])
     await message.answer(
-        f"Спасибо! Номер сохранён: {phone}\nТеперь выбирайте блюда 👇",
+        f"Спасибо! Номер сохранён: +{phone_clean}",  # показываем с +
         reply_markup=ReplyKeyboardRemove()
     )
     await show_categories(message, state)
+
+
+@router.message(F.contact, UserStates.waiting_phone_share)
+async def update_phone_from_contact(message: Message, state: FSMContext):
+    phone_raw = message.contact.phone_number
+    phone_clean = phone_raw.lstrip('+')
+    if phone_clean.startswith('8'):
+        phone_clean = '7' + phone_clean[1:]
+    
+    await process_phone_update(message, state, phone_clean)  # передаём чистый
+
+@router.message(UserStates.waiting_phone_manual)
+async def update_phone_from_text(message: Message, state: FSMContext):
+    phone_raw = message.text.strip()
+    phone_clean = "".join(filter(str.isdigit, phone_raw))  # только цифры
+    
+    if phone_clean.startswith("8"):
+        phone_clean = "7" + phone_clean[1:]
+    
+    if not (phone_clean.startswith("7") and len(phone_clean) == 11):
+        await message.answer("❌ Неверный формат номера. Введите в формате +7XXXXXXXXXX или 8XXXXXXXXXX или 7XXXXXXXXXX:")
+        return
+    
+    await process_phone_update(message, state, phone_clean)
 
 
 @router.callback_query(F.data == "user_back_to_categories")
@@ -276,20 +320,13 @@ async def show_cart(callback: CallbackQuery, state: FSMContext):
         text += "\n"
 
     text += f"<b>Итого: {total} ₽</b>\n\n"
-    text += "<i>Доставка бесплатная от 1500 ₽ или 250 рублей при заказе от 300 до 1500 ₽</i>"
+    text += "<i>Стоимость доставки 250 рублей\n<b>📌 Бесплатная доставка от 1500 ₽</b></i>"
 
     await callback.message.edit_text(text, reply_markup=cart_kb(), parse_mode="HTML")
 
 
 @router.callback_query(F.data == "user_checkout")
 async def checkout(callback: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    cart = data.get("cart", [])
-    total = sum(int(item["price"]) for item in cart)
-
-    if total < MIN_ORDER_FOR_DELIVERY:
-        await callback.answer(f"Минимальная сумма заказа для доставки — {MIN_ORDER_FOR_DELIVERY} ₽", show_alert=True)
-        return
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚚 Доставка", callback_data="delivery_type_delivery")],
@@ -307,7 +344,14 @@ async def process_delivery_type(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     total = sum(int(item["price"]) for item in data.get("cart", []))
 
-    delivery_cost = 0
+    if delivery_type == "delivery" and total < MIN_ORDER_FOR_DELIVERY:
+        await callback.answer(
+            f"Минимальная сумма заказа для доставки — {MIN_ORDER_FOR_DELIVERY} ₽",
+            show_alert=True
+        )
+        return
+
+    delivery_cost = 0   
     if delivery_type == "delivery":
         if total >= FREE_DELIVERY_MIN:
             delivery_cost = 0
@@ -329,27 +373,48 @@ async def process_delivery_type(callback: CallbackQuery, state: FSMContext):
 
         await callback.message.edit_text("Выберите адрес доставки:", reply_markup=kb)
         await state.set_state(UserStates.waiting_address_choice)
-    else:
-        await state.update_data(delivery_address=PICKUP_ADDRESS)
+    else:  # самовывоз
+                await state.update_data(delivery_address=PICKUP_ADDRESS)
 
-        status_text = get_restaurant_status_text()
-        time_options = generate_time_options()
-        kb_rows = []
-        row = []
-        for label, time_str in time_options:
-            row.append(InlineKeyboardButton(text=label, callback_data=f"prep_time_{time_str}"))
-            if len(row) == 2:
-                kb_rows.append(row)
+                # Расчёт текущего местного времени для проверки открытости
+                utc_now = datetime.datetime.utcnow()
+                local_now = utc_now + LOCAL_TZ_OFFSET
+                local_time = local_now.time()
+
+                status_text = get_restaurant_status_text()
+                time_options = generate_time_options(min_delay_minutes=PICKUP_PREPARE_MINUTES)
+
+                kb_rows = []
+
+                # Кнопка «Ближайшее время» только если сейчас открыто
+                if local_time < PICKUP_ORDER_END_TIME:
+                    kb_rows.append([InlineKeyboardButton(text="🔥 Ближайшее время", callback_data="prep_time_asap")])
+
+                # Обычные слоты по 2 в ряд
                 row = []
-        if row:
-            kb_rows.append(row)
-        kb_rows.append([InlineKeyboardButton(text="← Назад", callback_data="user_checkout")])
-        kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
+                for label, time_str in time_options:
+                    row.append(InlineKeyboardButton(text=label, callback_data=f"prep_time_{time_str}"))
+                    if len(row) == 2:
+                        kb_rows.append(row)
+                        row = []
+                if row:
+                    kb_rows.append(row)
 
-        message_text = f"Выберите время готовности заказа:\n\n<i>{status_text}</i>"
+                kb_rows.append([InlineKeyboardButton(text="← Назад", callback_data="user_checkout")])
+                kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
-        await callback.message.edit_text(message_text, reply_markup=kb, parse_mode="HTML")
-        await state.set_state(UserStates.waiting_prep_time)
+                message_text = f"Выберите время готовности заказа:\n\n<i>{status_text}</i>"
+
+                await callback.message.edit_text(message_text, reply_markup=kb, parse_mode="HTML")
+                await state.set_state(UserStates.waiting_prep_time)
+
+
+@router.callback_query(F.data == "new_address")
+async def new_address_input(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()  # ← Важно: снимает loading с кнопки
+
+    await callback.message.edit_text("🏠 Укажите новый адрес доставки:")
+    await state.set_state(UserStates.waiting_address)
 
 
 @router.callback_query(F.data.startswith("saved_address_"))
@@ -358,9 +423,21 @@ async def select_saved_address(callback: CallbackQuery, state: FSMContext):
 
     await state.update_data(delivery_address=address)
 
+    # Расчёт текущего местного времени
+    utc_now = datetime.datetime.utcnow()
+    local_now = utc_now + LOCAL_TZ_OFFSET
+    local_time = local_now.time()
+
     status_text = get_restaurant_status_text()
-    time_options = generate_time_options()
+    time_options = generate_time_options(min_delay_minutes=DELIVERY_PREPARE_MINUTES)
+
     kb_rows = []
+
+    # Кнопка «Ближайшее время» только если сейчас открыто
+    if local_time < ORDER_END_TIME:
+        kb_rows.append([InlineKeyboardButton(text="🔥 Ближайшее время", callback_data="prep_time_asap")])
+
+    # Обычные слоты по 2 в ряд
     row = []
     for label, time_str in time_options:
         row.append(InlineKeyboardButton(text=label, callback_data=f"prep_time_{time_str}"))
@@ -369,6 +446,7 @@ async def select_saved_address(callback: CallbackQuery, state: FSMContext):
             row = []
     if row:
         kb_rows.append(row)
+
     kb_rows.append([InlineKeyboardButton(text="← Назад", callback_data="user_checkout")])
     kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
@@ -376,18 +454,6 @@ async def select_saved_address(callback: CallbackQuery, state: FSMContext):
 
     await callback.message.edit_text(message_text, reply_markup=kb, parse_mode="HTML")
     await state.set_state(UserStates.waiting_prep_time)
-
-
-@router.callback_query(F.data == "new_address")
-async def new_address_input(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("🏠 Укажите новый адрес доставки:")
-    await state.set_state(UserStates.waiting_address)
-
-
-@router.message(UserStates.waiting_address_choice)
-async def address_choice_text(message: Message, state: FSMContext):
-    await message.answer("Пожалуйста, выберите адрес из списка или нажмите «Новый адрес».")
-    return
 
 
 @router.message(UserStates.waiting_address)
@@ -405,9 +471,21 @@ async def get_address(message: Message, state: FSMContext):
 
     await state.update_data(delivery_address=address)
 
+    # Расчёт текущего местного времени
+    utc_now = datetime.datetime.utcnow()
+    local_now = utc_now + LOCAL_TZ_OFFSET
+    local_time = local_now.time()
+
     status_text = get_restaurant_status_text()
-    time_options = generate_time_options()
+    time_options = generate_time_options(min_delay_minutes=DELIVERY_PREPARE_MINUTES)
+
     kb_rows = []
+
+    # Кнопка «Ближайшее время» только если сейчас открыто
+    if local_time < ORDER_END_TIME:
+        kb_rows.append([InlineKeyboardButton(text="🔥 Ближайшее время", callback_data="prep_time_asap")])
+
+    # Обычные слоты по 2 в ряд
     row = []
     for label, time_str in time_options:
         row.append(InlineKeyboardButton(text=label, callback_data=f"prep_time_{time_str}"))
@@ -416,6 +494,7 @@ async def get_address(message: Message, state: FSMContext):
             row = []
     if row:
         kb_rows.append(row)
+
     kb_rows.append([InlineKeyboardButton(text="← Назад", callback_data="user_checkout")])
     kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
@@ -427,12 +506,17 @@ async def get_address(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("prep_time_"))
 async def process_prep_time(callback: CallbackQuery, state: FSMContext):
-    prep_time = callback.data[len("prep_time_"):]
+    raw_prep_time = callback.data[len("prep_time_"):]
+
+    if raw_prep_time == "asap":
+        prep_time = "Ближайшее время"
+    else:
+        prep_time = raw_prep_time   # обычная строка даты/времени
+
+    await state.update_data(prep_time=prep_time)
 
     data = await state.get_data()
     delivery_type = data.get("delivery_type", "delivery")
-
-    await state.update_data(prep_time=prep_time)
 
     if delivery_type == "delivery":
         kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -465,10 +549,10 @@ async def process_payment_method(callback: CallbackQuery, state: FSMContext):
 async def get_cash_amount(message: Message, state: FSMContext):
     try:
         cash_amount = int(message.text.strip())
-        if cash_amount < 0:
+        if cash_amount < 500:
             raise ValueError
     except:
-        await message.answer("Введите корректную сумму (целое число больше 0):")
+        await message.answer("Введите корректную сумму (целое число больше 500):")
         return
 
     await state.update_data(cash_amount=cash_amount)
@@ -485,7 +569,27 @@ async def get_comment(message: Message, state: FSMContext, bot: Bot):
         comment = "Без комментария"
 
     data = await state.get_data()
-    phone = data["phone"]
+
+    # === БЕЗОПАСНОЕ получение телефона ===
+    user_id_str = str(message.from_user.id)
+    users = read_users()
+    phone_raw = users.get(user_id_str)  # Может быть None
+
+    if phone_raw is None or not phone_raw:
+        phone_display = "Не указан"
+        phone_for_db = "Не указан"
+    else:
+        phone_display = "+" + phone_raw
+        phone_for_db = phone_raw
+    # === КОНЕЦ ===
+
+    # Обновляем username актуальным
+    current_username = message.from_user.username
+    if current_username:
+        current_username = "@" + current_username
+    else:
+        current_username = "Скрыт"
+
     delivery_type = data.get("delivery_type", "delivery")
     delivery_address = data.get("delivery_address", "Не указан")
     prep_time = data.get("prep_time", "Не указано")
@@ -497,47 +601,70 @@ async def get_comment(message: Message, state: FSMContext, bot: Bot):
     total_items = sum(int(item["price"]) for item in cart)
     final_total = total_items + delivery_cost
 
-    order_text = "Заказ:\n"
     grouped = defaultdict(list)
     for item in cart:
         grouped[item["category"]].append(item)
 
+    # Текст заказа БЕЗ описаний (для админов и БД)
+    admin_order_text = "Заказ:\n"
     for cat, items in grouped.items():
-        order_text += f"<b>{cat}</b>\n"
+        admin_order_text += f"<b>{cat}</b>\n"
         for item in items:
-            desc = item.get('desc', '').strip()
-            order_text += f"• {item['name']} — {item['price']} ₽\n"
-            if desc:
-                order_text += f"  {desc}\n"
-        order_text += "\n"
+            admin_order_text += f"• {item['name']} — {item['price']} ₽\n"
+        admin_order_text += "\n"
 
-    order_text += f"Сумма заказа: {total_items} ₽\n"
+    admin_order_text += f"Сумма заказа: {total_items} ₽\n"
     if delivery_type == "delivery":
         if delivery_cost == 0:
-            order_text += "Доставка: бесплатно\n"
+            admin_order_text += "Доставка: бесплатно\n"
         else:
-            order_text += f"Доставка: {delivery_cost} ₽\n"
-    order_text += f"<b>К оплате: {final_total} ₽</b>"
+            admin_order_text += f"Доставка: {delivery_cost} ₽\n"
+    admin_order_text += f"<b>К оплате: {final_total} ₽</b>"
 
-    username = message.from_user.username or "Скрыт"
+    # Текст заказа С описаниями (только для клиента)
+    client_order_text = "Заказ:\n"
+    for cat, items in grouped.items():
+        client_order_text += f"<b>{cat}</b>\n"
+        for item in items:
+            desc = item.get('desc', '').strip()
+            client_order_text += f"• {item['name']} — {item['price']} ₽\n"
+            if desc:
+                client_order_text += f"  {desc}\n"
+        client_order_text += "\n"
 
+    client_order_text += f"Сумма заказа: {total_items} ₽\n"
+    if delivery_type == "delivery":
+        if delivery_cost == 0:
+            client_order_text += "Доставка: бесплатно\n"
+        else:
+            client_order_text += f"Доставка: {delivery_cost} ₽\n"
+    client_order_text += f"<b>К оплате: {final_total} ₽</b>"
+
+    # Сохраняем в БД
     append_order(
-        order_text, phone=phone, delivery_type=delivery_type, delivery_address=delivery_address,
-        comment=comment, username=username, prep_time=prep_time,
-        delivery_cost=delivery_cost, payment_method=payment_method, cash_amount=cash_amount
+        admin_order_text, phone=phone_for_db, delivery_type=delivery_type, delivery_address=delivery_address,
+        comment=comment, username=current_username, prep_time=prep_time,
+        delivery_cost=delivery_cost, payment_method=payment_method, cash_amount=cash_amount,
+        user_id=user_id_str
     )
 
     local_now = (datetime.datetime.utcnow() + LOCAL_TZ_OFFSET).strftime("%d.%m.%Y %H:%M")
-
-    # Определяем "СЕГОДНЯ"/"ЗАВТРА" для prep_time
-    prep_dt = datetime.datetime.strptime(prep_time, "%d.%m.%Y %H:%M")
     local_today = (datetime.datetime.utcnow() + LOCAL_TZ_OFFSET).date()
-    day_label = "СЕГОДНЯ" if prep_dt.date() == local_today else "ЗАВТРА" if prep_dt.date() == local_today + datetime.timedelta(days=1) else ""
-    prep_time_with_day = f"<b>{day_label}</b> {prep_time}" if day_label else prep_time
 
+    if prep_time == "Ближайшее время":
+        prep_time_with_day = "<b>БЛИЖАЙШЕЕ ВРЕМЯ</b>"
+    else:
+        try:
+            prep_dt = datetime.datetime.strptime(prep_time, "%d.%m.%Y %H:%M")
+            day_label = "СЕГОДНЯ" if prep_dt.date() == local_today else "ЗАВТРА" if prep_dt.date() == local_today + datetime.timedelta(days=1) else ""
+            prep_time_with_day = f"<b>{day_label}</b> {prep_time}" if day_label else prep_time
+        except:
+            prep_time_with_day = prep_time
+
+    # === ИСПРАВЛЕНО: инициализация admin_notification с заголовком ===
     admin_notification = f"🍲 <b>Новый заказ — Сытный Дом</b>\n\n"
-    admin_notification += f"📞 Телефон: {phone}\n"
-    admin_notification += f"👤 Username: @{username}\n"
+    admin_notification += f"📞 Телефон: {phone_display}\n"
+    admin_notification += f"👤 Username: {current_username}\n"
     admin_notification += f"💬 Комментарий: {comment}\n"
     admin_notification += f"⏰ Готовность к: {prep_time_with_day}\n"
     if payment_method == "cash" and cash_amount is not None:
@@ -547,34 +674,29 @@ async def get_comment(message: Message, state: FSMContext, bot: Bot):
     admin_notification += "\n"
     if delivery_type == "delivery":
         admin_notification += f"🚚 <b>Доставка</b>\n📍 Адрес: {delivery_address}\n"
-        if delivery_cost == 0:
-            admin_notification += "Доставка бесплатная\n"
-        else:
-            admin_notification += f"Стоимость доставки: {delivery_cost} ₽\n"
     else:
         admin_notification += f"🏃 <b>Самовывоз</b>\n📍 Адрес: {PICKUP_ADDRESS}\n"
     admin_notification += "\n"
-    admin_notification += order_text + "\n"
+    admin_notification += admin_order_text + "\n"
     admin_notification += f"🕒 Время оформления: {local_now}"
+    # === КОНЕЦ ИСПРАВЛЕНИЯ ===
 
     for admin_id in ADMIN_IDS:
         await bot.send_message(admin_id, admin_notification, parse_mode="HTML")
 
+    # Подтверждение клиенту
     client_confirmation = "✅ <b>Спасибо за заказ!</b>\n\n"
-    client_confirmation += order_text + "\n\n"
+    client_confirmation += client_order_text + "\n\n"
     client_confirmation += f"⏰ Готовность к: {prep_time_with_day}\n"
     if delivery_type == "delivery":
         client_confirmation += f"🚚 <b>Доставка по адресу:</b>\n{delivery_address}\n"
-        if delivery_cost == 0:
-            client_confirmation += "Доставка бесплатная\n"
-        else:
-            client_confirmation += f"Стоимость доставки: {delivery_cost} ₽\n"
     else:
         client_confirmation += f"🏃 <b>Самовывоз по адресу:</b>\n{PICKUP_ADDRESS}\n"
     if payment_method == "cash" and cash_amount is not None:
         client_confirmation += f"💵 Оплата наличными, сдача с {cash_amount} ₽\n"
     elif payment_method == "card":
         client_confirmation += f"💳 Оплата картой курьеру\n"
+    client_confirmation += "\n\n👤 Чтобы посмотреть ваши адреса и историю заказов, введите команду /profile"
     client_confirmation += "\nМы свяжемся с вами в ближайшее время для подтверждения. Приятного аппетита! 🍲"
 
     await message.answer(client_confirmation, parse_mode="HTML")
@@ -600,3 +722,147 @@ async def clear_cart(callback: CallbackQuery, state: FSMContext):
     await state.update_data(cart=[])
     await callback.answer("Корзина очищена")
     await show_categories(callback, state)
+
+
+async def process_phone_update(message: Message, state: FSMContext, phone_clean: str):
+    user_id = str(message.from_user.id)
+    
+    users = read_users()
+    users[user_id] = phone_clean  # сохраняем чистые цифры
+    save_user_phone(user_id, phone_clean)
+    
+    phone_display = "+" + phone_clean  # для показа пользователю
+    
+    await message.answer(
+        f"✅ Номер телефона успешно обновлён: {phone_display}",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    await show_profile(message)
+    await state.clear()
+
+
+async def show_profile(obj):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚗 Адреса доставки", callback_data="profile_addresses")],
+        [InlineKeyboardButton(text="📋 Мои заказы", callback_data="profile_orders")],
+        [InlineKeyboardButton(text="📱 Номер телефона", callback_data="profile_phone")],  # ← НОВАЯ КНОПКА
+        [InlineKeyboardButton(text="← В меню", callback_data="user_back_to_categories")]
+    ])
+    text = "👤 <b>Ваш профиль</b>\n\nВыберите раздел:"
+
+    if isinstance(obj, Message):
+        await obj.answer(text, reply_markup=kb, parse_mode="HTML")
+    elif isinstance(obj, CallbackQuery):
+        await obj.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+@router.message(Command("profile"))
+async def cmd_profile(message: Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state:
+        await message.answer("Во время оформления заказа команда /profile недоступна. Завершите заказ или введите «отмена» для отмены.")
+        return
+
+    user_id = str(message.from_user.id)
+    users = read_users()
+    if user_id not in users:
+        await message.answer("Вы не авторизованы. Начните с команды /start")
+        return
+
+    await show_profile(message)
+
+
+@router.callback_query(F.data == "back_to_profile")
+async def back_to_profile(callback: CallbackQuery):
+    await show_profile(callback)
+
+
+@router.callback_query(F.data == "profile_addresses")
+async def profile_addresses(callback: CallbackQuery):
+    user_id = str(callback.from_user.id)
+    addresses = get_user_addresses(user_id)
+
+    text = "🚗 <b>Сохранённые адреса доставки</b>\n\n"
+    if not addresses:
+        text += "Нет сохранённых адресов.\n\nАдрес можно добавить при оформлении заказа с доставкой."
+    else:
+        for num, addr in enumerate(addresses, 1):
+            text += f"{num}. {addr}\n"
+        text += "\nЧтобы очистить весь список адресов — используйте команду /clear_addresses"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="← Назад в профиль", callback_data="back_to_profile")]
+    ])
+
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "profile_orders")
+async def profile_orders(callback: CallbackQuery):
+    user_id = str(callback.from_user.id)
+
+    orders = get_user_orders(user_id)
+
+    text = "📋 <b>Ваши последние заказы</b> (до 10 шт.)\n\n"
+    if not orders:
+        text += "Вы ещё не делали заказы 🙂"
+    else:
+        for order in orders:
+            prep_time = order['prep_time']
+            if prep_time == "Ближайшее время":
+                prep_display = "<b>БЛИЖАЙШЕЕ ВРЕМЯ</b>"
+            else:
+                prep_display = prep_time
+
+            text += f"🕒 Оформлен: {order['timestamp']}\n"
+            text += f"⏰ Готовность: {prep_display}\n\n"
+            text += order['order_text']
+            text += "\n" + "—" * 30 + "\n\n"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="← Назад в профиль", callback_data="back_to_profile")]
+    ])
+
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "profile_phone")
+async def profile_phone(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+
+    user_id = str(callback.from_user.id)
+    users = read_users()
+    phone_clean = users.get(user_id)  # Может быть None, если ключа нет
+
+    if phone_clean is None or not phone_clean:
+        phone_display = "Не указан"
+    else:
+        phone_display = "+" + phone_clean
+
+    text = f"📱 <b>Ваш номер телефона:</b> {phone_display}\n\n"
+    text += "Вы можете обновить номер одним из способов ниже:"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📱 Поделиться номером телефона", callback_data="phone_share")],
+        [InlineKeyboardButton(text="⌨️ Ввести номер телефона вручную", callback_data="phone_manual")],
+        [InlineKeyboardButton(text="← Назад в профиль", callback_data="back_to_profile")]
+    ])
+
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "phone_share")
+async def phone_share(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+
+    await callback.message.edit_text("Нажмите кнопку ниже, чтобы поделиться номером телефона:")
+    await callback.message.answer("Поделитесь контактом:", reply_markup=phone_kb)
+    await state.set_state(UserStates.waiting_phone_share)
+
+
+@router.callback_query(F.data == "phone_manual")
+async def phone_manual(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+
+    await callback.message.edit_text("Введите номер телефона вручную (в формате +7XXXXXXXXXX или 8XXXXXXXXXX):")
+    await state.set_state(UserStates.waiting_phone_manual)

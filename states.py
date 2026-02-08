@@ -10,6 +10,9 @@ class UserStates(StatesGroup):
     waiting_payment_method = State()
     waiting_cash_amount = State()
     waiting_comment = State()
+    waiting_phone_update = State()
+    waiting_phone_share = State()     # для поделиться контактом
+    waiting_phone_manual = State()
 
 
 class AdminStates(StatesGroup):
