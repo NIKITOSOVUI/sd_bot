@@ -29,3 +29,4 @@ class AdminStates(StatesGroup):
     viewing_orders = State()
     choosing_date_from = State()
     choosing_date_to = State()
+    waiting_broadcast_message = State()

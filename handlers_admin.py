@@ -1,11 +1,11 @@
-from aiogram import Router, F
+from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
 from db import LOCAL_TZ_OFFSET
 
-from db import read_menu, write_menu, get_orders_filtered
+from db import read_menu, write_menu, get_orders_filtered, get_all_user_ids
 from keyboards import admin_main_kb, admin_categories_kb
 from states import AdminStates
 from config import ADMIN_IDS
@@ -590,3 +590,40 @@ async def back_to_orders_filter(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     except TelegramBadRequest:
         await callback.answer("Вы уже в меню выбора периода")
+
+
+@router.callback_query(F.data == "admin_broadcast")
+async def admin_broadcast(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        return
+    await callback.answer()
+
+    text = "📤 Введите сообщение для рассылки всем пользователям бота:"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="← Отмена", callback_data="admin_back")]
+    ])
+    await callback.message.edit_text(text, reply_markup=kb)
+    await state.set_state(AdminStates.waiting_broadcast_message)
+
+
+@router.message(AdminStates.waiting_broadcast_message)
+async def process_broadcast_message(message: Message, state: FSMContext, bot: Bot):
+    if not await is_admin(message.from_user.id):
+        return
+
+    broadcast_message = message.text.strip()
+    if not broadcast_message:
+        await message.answer("Сообщение не может быть пустым. Повторите ввод:")
+        return
+
+    user_ids = get_all_user_ids()
+    sent_count = 0
+    for user_id in user_ids:
+        try:
+            await bot.send_message(int(user_id), broadcast_message)
+            sent_count += 1
+        except Exception as e:
+            print(f"Ошибка отправки пользователю {user_id}: {e}")
+
+    await message.answer(f"✅ Рассылка завершена. Отправлено {sent_count} пользователям.", reply_markup=admin_main_kb())
+    await state.clear()

@@ -75,6 +75,7 @@ def admin_main_kb():
         [InlineKeyboardButton(text="➕ Добавить блюдо", callback_data="admin_add_dish")],
         [InlineKeyboardButton(text="➖ Удалить блюдо", callback_data="admin_delete_dish")],
         [InlineKeyboardButton(text="📦 Просмотреть заказы", callback_data="admin_view_orders")],
+        [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=kb)
 

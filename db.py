@@ -280,3 +280,12 @@ def migrate_db():
     
     conn.commit()
     conn.close()
+
+
+def get_all_user_ids():
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("SELECT user_id FROM users")
+    user_ids = [row[0] for row in cur.fetchall()]
+    conn.close()
+    return user_ids
