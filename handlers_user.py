@@ -133,7 +133,7 @@ async def block_commands_during_order(message: Message):
     await message.answer("Во время оформления заказа команды запрещены. Завершите заказ или введите «отмена» для отмены.")
 
 
-# Глобальная отмена по слову "отмена" на всех этапах оформления
+# Глобальная отмена по слову "отмена" на всех этапах (добавьте waiting_phone)
 @router.message(or_f(
     UserStates.waiting_delivery_type,
     UserStates.waiting_address_choice,
@@ -141,7 +141,8 @@ async def block_commands_during_order(message: Message):
     UserStates.waiting_prep_time,
     UserStates.waiting_payment_method,
     UserStates.waiting_cash_amount,
-    UserStates.waiting_comment
+    UserStates.waiting_comment,
+    UserStates.waiting_phone  # ← НОВОЕ: для отмены на этапе номера
 ), F.text.lower() == "отмена")
 async def cancel_by_text(message: Message, state: FSMContext):
     await state.clear()
@@ -197,7 +198,7 @@ async def get_phone(message: Message, state: FSMContext):
     
     users = read_users()
     users[user_id] = phone_clean  # сохраняем чистые цифры "79016406231"
-    save_user_phone(users, phone_clean)
+    save_user_phone(user_id, phone_clean)  # Исправьте на вашу функцию
     
     await state.update_data(phone=phone_clean, cart=[])
     await message.answer(
@@ -205,6 +206,7 @@ async def get_phone(message: Message, state: FSMContext):
         reply_markup=ReplyKeyboardRemove()
     )
     await show_categories(message, state)
+    await state.clear()  # ← НОВОЕ: очищаем состояние
 
 
 @router.message(F.contact, UserStates.waiting_phone_share)
