@@ -13,6 +13,7 @@ class UserStates(StatesGroup):
     waiting_phone_update = State()
     waiting_phone_share = State()     # для поделиться контактом
     waiting_phone_manual = State()
+    waiting_promo_code = State()
 
 
 class AdminStates(StatesGroup):
@@ -25,8 +26,16 @@ class AdminStates(StatesGroup):
     adding_dish_desc = State()
     choosing_delete_dish_category = State()
     deleting_dish_num = State()
-
     viewing_orders = State()
     choosing_date_from = State()
     choosing_date_to = State()
     waiting_broadcast_message = State()
+    # Новое для промокодов
+    managing_promos = State()
+    adding_promo_name = State()
+    adding_promo_code = State()
+    adding_promo_min_sum = State()
+    adding_promo_type = State()
+    adding_promo_discount = State()
+    choosing_promo_item_category = State()
+    choosing_promo_item = State()

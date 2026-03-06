@@ -5,8 +5,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
 from db import LOCAL_TZ_OFFSET
 
-from db import read_menu, write_menu, get_orders_filtered, get_all_user_ids
-from keyboards import admin_main_kb, admin_categories_kb
+from db import read_menu, write_menu, get_orders_filtered, get_all_user_ids, create_promo, get_promos, get_promo_by_code, delete_promo, get_promo_stats, get_menu_item_by_id
+from keyboards import admin_main_kb, admin_categories_kb, promo_type_kb, admin_promos_kb, admin_promo_actions_kb, admin_promo_categories_kb, admin_promo_items_kb
 from states import AdminStates
 from config import ADMIN_IDS
 
@@ -627,3 +627,160 @@ async def process_broadcast_message(message: Message, state: FSMContext, bot: Bo
 
     await message.answer(f"✅ Рассылка завершена. Отправлено {sent_count} пользователям.", reply_markup=admin_main_kb())
     await state.clear()
+
+
+# Новое: подменю промокодов
+@router.callback_query(F.data == "admin_promos")
+async def admin_promos(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        return
+    await callback.message.edit_text("Управление промокодами", reply_markup=admin_promos_kb())
+    await state.set_state(AdminStates.managing_promos)
+
+# Новое: просмотр конкретного промокода
+@router.callback_query(F.data.startswith("admin_view_promo_"))
+async def admin_view_promo(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        return
+    promo_id = int(callback.data[len("admin_view_promo_"):])
+    promos = get_promos()
+    promo = next((p for p in promos if p[0] == promo_id), None)
+    if not promo:
+        await callback.answer("Промокод не найден", show_alert=True)
+        return
+    _, name, code, min_sum, promo_type, item_id, discount = promo
+    text = f"Промокод: {name} ({code})\nУсловие: от {min_sum} ₽\nТип: {'Бесплатная позиция' if promo_type == 'item' else 'Скидка'}\n"
+    if promo_type == 'item':
+        item = get_menu_item_by_id(item_id)
+        text += f"Позиция: {item['name']} (бесплатно)"
+    else:
+        text += f"Скидка: {discount} ₽"
+    await callback.message.edit_text(text, reply_markup=admin_promo_actions_kb(promo_id))
+
+# Новое: статистика по промокоду
+@router.callback_query(F.data.startswith("admin_promo_stats_"))
+async def admin_promo_stats(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        return
+    promo_id = int(callback.data[len("admin_promo_stats_"):])
+    promos = get_promos()
+    promo = next((p for p in promos if p[0] == promo_id), None)
+    if not promo:
+        await callback.answer("Промокод не найден", show_alert=True)
+        return
+    code = promo[2]
+    count = get_promo_stats(code)
+    await callback.answer(f"Использовано: {count} раз в завершенных заказах", show_alert=True)
+
+# Новое: удаление промокода
+@router.callback_query(F.data.startswith("admin_delete_promo_"))
+async def admin_delete_promo(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        return
+    promo_id = int(callback.data[len("admin_delete_promo_"):])
+    delete_promo(promo_id)
+    await callback.message.edit_text("Промокод удален", reply_markup=admin_promos_kb())
+
+# Новое: начало добавления промокода
+@router.callback_query(F.data == "admin_add_promo")
+async def admin_add_promo_start(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        return
+    await callback.message.edit_text("Введите название промокода:")
+    await state.set_state(AdminStates.adding_promo_name)
+
+@router.message(AdminStates.adding_promo_name)
+async def admin_add_promo_code(message: Message, state: FSMContext):
+    if not await is_admin(message.from_user.id):
+        return
+    await state.update_data(promo_name=message.text.strip())
+    await message.answer("Введите сам промокод (строку):")
+    await state.set_state(AdminStates.adding_promo_code)
+
+@router.message(AdminStates.adding_promo_code)
+async def admin_add_promo_min_sum(message: Message, state: FSMContext):
+    if not await is_admin(message.from_user.id):
+        return
+    code = message.text.strip().upper()
+    if get_promo_by_code(code):
+        await message.answer("Промокод уже существует! Введите другой.")
+        return
+    await state.update_data(promo_code=code)
+    await message.answer("Введите минимальную сумму заказа (без доставки, только цифры):")
+    await state.set_state(AdminStates.adding_promo_min_sum)
+
+@router.message(AdminStates.adding_promo_min_sum)
+async def admin_add_promo_type(message: Message, state: FSMContext):
+    if not await is_admin(message.from_user.id):
+        return
+    if not message.text.strip().isdigit():
+        await message.answer("Ошибка: сумма должна быть числом!")
+        return
+    await state.update_data(promo_min_sum=int(message.text.strip()))
+    await message.answer("Выберите тип промокода:", reply_markup=promo_type_kb())
+    await state.set_state(AdminStates.adding_promo_type)
+
+@router.callback_query(F.data.startswith("admin_promo_type_"))
+async def admin_add_promo_type_selected(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        return
+    promo_type = callback.data[len("admin_promo_type_"):]
+    await state.update_data(promo_type=promo_type)
+    if promo_type == "discount":
+        await callback.message.edit_text("Введите сумму скидки (рублей, только цифры):")
+        await state.set_state(AdminStates.adding_promo_discount)
+    else:  # item
+        await callback.message.edit_text("Выберите категорию для позиции:", reply_markup=admin_promo_categories_kb())
+        await state.set_state(AdminStates.choosing_promo_item_category)
+
+@router.message(AdminStates.adding_promo_discount)
+async def admin_add_promo_finish_discount(message: Message, state: FSMContext):
+    if not await is_admin(message.from_user.id):
+        return
+    if not message.text.strip().isdigit():
+        await message.answer("Ошибка: сумма должна быть числом!")
+        return
+    data = await state.get_data()
+    create_promo(data["promo_name"], data["promo_code"], data["promo_min_sum"], "discount", discount=int(message.text.strip()))
+    await message.answer("Промокод создан!", reply_markup=admin_promos_kb())
+    await state.clear()
+
+@router.callback_query(F.data.startswith("admin_promo_cat_"))
+async def admin_promo_select_category(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        return
+    category = callback.data[len("admin_promo_cat_"):]
+    menu_list = read_menu()
+    items = next((cat["items"] for cat in menu_list if cat["category"] == category), None)
+    if not items:
+        await callback.answer("Категория пустая")
+        return
+    await state.update_data(promo_category=category, promo_items=items)
+    text = f"Выберите позицию в {category}:"
+    await callback.message.edit_text(text, reply_markup=admin_promo_items_kb(items))
+
+@router.callback_query(F.data.startswith("admin_promo_select_item_"))
+async def admin_add_promo_finish_item(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        return
+    data = await state.get_data()
+    items = data.get("promo_items")
+    try:
+        index = int(callback.data[len("admin_promo_select_item_"):])
+        item = items[index]
+    except:
+        await callback.answer("Ошибка выбора")
+        return
+    # Получаем item_id из БД (нужно добавить id в read_menu, но для простоты предположим, что read_menu возвращает с id; иначе перепишите read_menu)
+    # Внимание: нужно обновить read_menu чтобы возвращать id для items!
+    # Для этого изменим read_menu:
+    # В read_menu: items = [{"id": row[0], "name": row[1], "price": row[2], "desc": row[3]} for row in cur.fetchall() где SELECT id, name, price, desc
+    # (Добавьте в db.py: cur.execute("SELECT id, name, price, desc FROM menu_items WHERE category_id = ? ORDER BY id", (cat_id,)))
+    item_id = item["id"]  # Предполагаем, что добавлено
+    create_promo(data["promo_name"], data["promo_code"], data["promo_min_sum"], "item", item_id=item_id)
+    await callback.message.edit_text(f"Промокод создан с позицией {item['name']}!", reply_markup=admin_promos_kb())
+    await state.clear()
+
+@router.callback_query(F.data == "admin_promo_categories")
+async def admin_promo_back_to_categories(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("Выберите категорию для позиции:", reply_markup=admin_promo_categories_kb())

@@ -56,6 +56,25 @@ def init_db():
                     price TEXT,
                     desc TEXT,
                     FOREIGN KEY (category_id) REFERENCES categories (id))''')
+    
+    # Новое: таблица промокодов
+    cur.execute('''CREATE TABLE IF NOT EXISTS promos
+                   (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT,
+                    code TEXT UNIQUE,
+                    min_sum INTEGER,
+                    type TEXT,  -- 'item' or 'discount'
+                    item_id INTEGER,
+                    discount INTEGER,
+                    FOREIGN KEY (item_id) REFERENCES menu_items (id))''')
+
+    # Новое: таблица использованных промокодов
+    cur.execute('''CREATE TABLE IF NOT EXISTS used_promos
+                   (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT,
+                    promo_code TEXT,
+                    order_id INTEGER,
+                    FOREIGN KEY (order_id) REFERENCES orders (id))''')
 
     conn.commit()
     conn.close()
@@ -104,8 +123,8 @@ def read_menu():
     categories = cur.fetchall()
 
     for cat_id, cat_name in categories:
-        cur.execute("SELECT name, price, desc FROM menu_items WHERE category_id = ? ORDER BY id", (cat_id,))
-        items = [{"name": row[0], "price": row[1], "desc": row[2] if row[2] else ""} for row in cur.fetchall()]
+        cur.execute("SELECT id, name, price, desc FROM menu_items WHERE category_id = ? ORDER BY id", (cat_id,))
+        items = [{"id": row[0], "name": row[1], "price": row[2], "desc": row[3] if row[3] else ""} for row in cur.fetchall()]
         menu_list.append({"category": cat_name, "items": items})
 
     conn.close()
@@ -148,8 +167,12 @@ def append_order(order_text: str, phone: str, delivery_type: str, delivery_addre
         prep_time, delivery_cost, payment_method, cash_amount, user_id
     ))
     
+    order_id = cursor.lastrowid  # Получаем ID только что вставленного заказа
+    
     conn.commit()
     conn.close()
+    
+    return order_id
 
 
 def read_users():
@@ -289,3 +312,67 @@ def get_all_user_ids():
     user_ids = [row[0] for row in cur.fetchall()]
     conn.close()
     return user_ids
+
+
+def create_promo(name: str, code: str, min_sum: int, promo_type: str, item_id: int = None, discount: int = None):
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute('''INSERT INTO promos (name, code, min_sum, type, item_id, discount)
+                   VALUES (?, ?, ?, ?, ?, ?)''', (name, code.upper(), min_sum, promo_type, item_id, discount))
+    conn.commit()
+    conn.close()
+
+def get_promos():
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("SELECT id, name, code, min_sum, type, item_id, discount FROM promos")
+    promos = cur.fetchall()
+    conn.close()
+    return promos
+
+def get_promo_by_code(code: str):
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("SELECT id, name, code, min_sum, type, item_id, discount FROM promos WHERE code = ?", (code.upper(),))
+    promo = cur.fetchone()
+    conn.close()
+    return promo
+
+def delete_promo(promo_id: int):
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM promos WHERE id = ?", (promo_id,))
+    conn.commit()
+    conn.close()
+
+def get_promo_stats(code: str):
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM used_promos WHERE promo_code = ?", (code.upper(),))
+    count = cur.fetchone()[0]
+    conn.close()
+    return count
+
+def is_promo_used_by_user(user_id: str, code: str):
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM used_promos WHERE user_id = ? AND promo_code = ?", (user_id, code.upper()))
+    used = cur.fetchone() is not None
+    conn.close()
+    return used
+
+def mark_promo_as_used(user_id: str, code: str, order_id: int):
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute('''INSERT INTO used_promos (user_id, promo_code, order_id)
+                   VALUES (?, ?, ?)''', (user_id, code.upper(), order_id))
+    conn.commit()
+    conn.close()
+
+def get_menu_item_by_id(item_id: int):
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("SELECT name, price, desc FROM menu_items WHERE id = ?", (item_id,))
+    item = cur.fetchone()
+    conn.close()
+    return {"name": item[0], "price": item[1], "desc": item[2]} if item else None

@@ -1,14 +1,17 @@
 from aiogram import Router, F, Bot
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message, CallbackQuery, Contact, ReplyKeyboardRemove, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 from aiogram.filters.logic import or_f
 from aiogram.fsm.context import FSMContext
-from db import read_menu, append_order, read_users, save_user_phone, get_user_addresses, save_user_addresses, get_user_orders
+from db import read_menu, append_order, read_users, save_user_phone, get_user_addresses, save_user_addresses, get_user_orders, get_promo_by_code, is_promo_used_by_user, mark_promo_as_used, get_menu_item_by_id
 from keyboards import phone_kb, categories_kb, category_kb, cart_kb
 from states import UserStates
 from config import WELCOME_PHOTO_PATH
 import datetime
 from collections import defaultdict
+from typing import Union
+import asyncio
 
 router = Router()
 
@@ -295,36 +298,219 @@ async def add_to_cart(callback: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data == "user_cart")
-async def show_cart(callback: CallbackQuery, state: FSMContext):
+async def show_cart(event: Union[CallbackQuery, Message], state: FSMContext):
     data = await state.get_data()
     cart = data.get("cart", [])
     if not cart:
-        await callback.answer("Корзина пуста", show_alert=True)
+        if isinstance(event, CallbackQuery):
+            await event.answer("Корзина пуста", show_alert=True)
+        else:
+            await event.answer("Корзина пуста")
         return
 
     grouped = defaultdict(list)
-    total = 0
+    subtotal = 0
     for citem in cart:
         grouped[citem["category"]].append(citem)
-        total += int(citem["price"])
+        subtotal += int(citem["price"])
 
-    text = "🛒 <b>Ваша корзина</b>\n\n"
+    applied_promo = data.get("applied_promo")
+    discount = data.get("promo_discount", 0)
+    total = subtotal - discount
+
+    delivery_cost = 0 if total >= FREE_DELIVERY_MIN else DELIVERY_COST
+    final_total = total + delivery_cost
+
+    text = "Ваша корзина\n\n"
 
     for cat, citems in grouped.items():
-        text += f"<b>{cat}</b>\n"
-
+        text += f"{cat}\n"
         for item in citems:
             desc = item.get('desc', '').strip()
-            text += f"• {item['name']} — {item['price']} ₽\n"
+            price = item['price'] if not item.get('is_promo', False) else "бесплатно (промо)"
+            text += f"• {item['name']} — {price} \n"
             if desc:
                 text += f"  {desc}\n"
-
         text += "\n"
 
-    text += f"<b>Итого: {total} ₽</b>\n\n"
-    text += "<i>Стоимость доставки 250 рублей\n<b>📌 Бесплатная доставка от 1500 ₽</b></i>"
+    text += f"Сумма заказа: {subtotal} ₽\n"
+    if applied_promo:
+        text += f"Промокод применен: {applied_promo['code']}\n"
+        if applied_promo['type'] == 'discount':
+            text += f"Скидка: {discount} ₽\n"
+    if delivery_cost == 0:
+        text += "Доставка: бесплатно (от 1500 ₽)\n"
+    else:
+        text += f"Доставка: {delivery_cost} ₽\n"
+    text += f"<b>К оплате с доставкой: {final_total} ₽</b>"
 
-    await callback.message.edit_text(text, reply_markup=cart_kb(), parse_mode="HTML")
+    has_promo = bool(applied_promo)
+    markup = cart_kb(has_promo)
+
+    if isinstance(event, CallbackQuery):
+        await event.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+        await state.update_data(last_cart_message_id=event.message.message_id)  # Сохраняем для future edit
+    else:
+        sent_msg = await event.answer(text, reply_markup=markup, parse_mode="HTML")
+        await state.update_data(last_cart_message_id=sent_msg.message_id)  # Сохраняем
+
+
+# Новое: кнопка ввода промокода
+@router.callback_query(F.data == "user_enter_promo")
+async def enter_promo(callback: CallbackQuery, state: FSMContext):
+    prompt_msg = await callback.message.answer("Введите промокод:")
+    await state.update_data(promo_prompt_id=prompt_msg.message_id, last_cart_message_id=callback.message.message_id)
+    await state.set_state(UserStates.waiting_promo_code)
+
+@router.message(UserStates.waiting_promo_code)
+async def apply_promo(message: Message, state: FSMContext):
+    import asyncio  # Добавьте в импорты файла, если нет
+
+    code = message.text.strip().upper()
+    data = await state.get_data()
+    cart = data.get("cart", [])
+    total = sum(int(item["price"]) for item in cart if not item.get('is_promo', False))  # без доставки и без promo item
+
+    promo = get_promo_by_code(code)
+    bot = message.bot
+    chat_id = message.chat.id
+    prompt_id = data.get("promo_prompt_id")
+    cart_msg_id = data.get("last_cart_message_id")
+
+    # Удаляем ввод пользователя (код)
+    await message.delete()
+
+    # Удаляем prompt "Введите промокод:"
+    if prompt_id:
+        try:
+            await bot.delete_message(chat_id, prompt_id)
+        except:
+            pass  # Если уже удалено или ошибка
+
+    if not promo:
+        error_msg = await message.answer("Неверный промокод.")
+        await state.set_state(None)
+        # Удаляем старую корзину
+        if cart_msg_id:
+            try:
+                await bot.delete_message(chat_id, cart_msg_id)
+            except:
+                pass
+        # Показываем новую корзину
+        new_cart_msg = await message.answer("Корзина обновлена.")  # Временный placeholder
+        await show_cart_as_edit(bot, chat_id, new_cart_msg.message_id, state)  # Но на самом деле edit placeholder на корзину
+        await asyncio.sleep(5)  # Ждем 5 сек
+        await error_msg.delete()  # Удаляем ошибку
+        return
+
+    _, _, _, min_sum, promo_type, item_id, discount = promo
+
+    user_id = str(message.from_user.id)
+    if is_promo_used_by_user(user_id, code):
+        error_msg = await message.answer("Вы уже использовали этот промокод.")
+        await state.set_state(None)
+        if cart_msg_id:
+            try:
+                await bot.delete_message(chat_id, cart_msg_id)
+            except:
+                pass
+        new_cart_msg = await message.answer("Корзина обновлена.")
+        await show_cart_as_edit(bot, chat_id, new_cart_msg.message_id, state)
+        await asyncio.sleep(5)
+        await error_msg.delete()
+        return
+
+    if total < min_sum:
+        error_msg = await message.answer(f"Для применения промокода заказ должен быть от {min_sum} ₽ (без доставки).")
+        await state.set_state(None)
+        if cart_msg_id:
+            try:
+                await bot.delete_message(chat_id, cart_msg_id)
+            except:
+                pass
+        new_cart_msg = await message.answer("Корзина обновлена.")
+        await show_cart_as_edit(bot, chat_id, new_cart_msg.message_id, state)
+        await asyncio.sleep(5)
+        await error_msg.delete()
+        return
+
+    # Применяем
+    applied_promo = {"code": code, "type": promo_type}
+    await state.update_data(applied_promo=applied_promo)
+
+    if promo_type == "item":
+        item = get_menu_item_by_id(item_id)
+        if item:
+            item["price"] = "0"
+            item["is_promo"] = True
+            item["category"] = "Промо"
+            cart.append(item)
+            await state.update_data(cart=cart)
+    else:  # discount
+        await state.update_data(promo_discount=discount)
+
+    success_msg = await message.answer("Промокод применен!")
+    await state.set_state(None)
+
+    # Edit корзину с обновлением
+    if cart_msg_id:
+        await show_cart_as_edit(bot, chat_id, cart_msg_id, state)
+
+    await asyncio.sleep(2)  # Ждем 2 сек
+    await success_msg.delete()  # Удаляем "Промокод применен!"
+
+
+async def show_cart_as_edit(bot: Bot, chat_id: int, message_id: int, state: FSMContext):
+    data = await state.get_data()
+    cart = data.get("cart", [])
+    if not cart:
+        await bot.send_message(chat_id, "Корзина пуста")  # Fallback если edit не сработает
+        return
+
+    grouped = defaultdict(list)
+    subtotal = 0
+    for citem in cart:
+        grouped[citem["category"]].append(citem)
+        subtotal += int(citem["price"])
+
+    applied_promo = data.get("applied_promo")
+    discount = data.get("promo_discount", 0)
+    total = subtotal - discount
+
+    delivery_cost = 0 if total >= FREE_DELIVERY_MIN else DELIVERY_COST
+    final_total = total + delivery_cost
+
+    text = "Ваша корзина\n\n"
+
+    for cat, citems in grouped.items():
+        text += f"{cat}\n"
+        for item in citems:
+            desc = item.get('desc', '').strip()
+            price = item['price'] if not item.get('is_promo', False) else "бесплатно (промо)"
+            text += f"• {item['name']} — {price} \n"
+            if desc:
+                text += f"  {desc}\n"
+        text += "\n"
+
+    text += f"Сумма заказа: {subtotal} ₽\n"
+    if applied_promo:
+        text += f"Промокод применен: {applied_promo['code']}\n"
+        if applied_promo['type'] == 'discount':
+            text += f"Скидка: {discount} ₽\n"
+    if delivery_cost == 0:
+        text += "Доставка: бесплатно (от 1500 ₽)\n"
+    else:
+        text += f"Доставка: {delivery_cost} ₽\n"
+    text += f"<b>К оплате с доставкой: {final_total} ₽</b>"
+
+    has_promo = bool(applied_promo)
+    markup = cart_kb(has_promo)
+
+    try:
+        await bot.edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=markup, parse_mode="HTML")
+    except TelegramBadRequest:
+        # Если нельзя edit (e.g., текст не изменился или ошибка), отправляем новый
+        await bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
 
 
 @router.callback_query(F.data == "user_checkout")
@@ -571,6 +757,13 @@ async def get_comment(message: Message, state: FSMContext, bot: Bot):
         comment = "Без комментария"
 
     data = await state.get_data()
+    if "cart" not in data or not data["cart"]:
+        await message.answer("Ошибка: корзина пуста или не инициализирована. Оформление заказа отменено.")
+        await state.clear()
+        await show_categories(message, state)
+        return
+    applied_promo = data.get("applied_promo")
+    discount = data.get("promo_discount", 0)
 
     # === БЕЗОПАСНОЕ получение телефона ===
     user_id_str = str(message.from_user.id)
@@ -600,6 +793,7 @@ async def get_comment(message: Message, state: FSMContext, bot: Bot):
     cash_amount = data.get("cash_amount")
     cart = data["cart"]
 
+    subtotal = sum(int(item["price"]) for item in cart)
     total_items = sum(int(item["price"]) for item in cart)
     final_total = total_items + delivery_cost
 
@@ -612,10 +806,16 @@ async def get_comment(message: Message, state: FSMContext, bot: Bot):
     for cat, items in grouped.items():
         admin_order_text += f"<b>{cat}</b>\n"
         for item in items:
-            admin_order_text += f"• {item['name']} — {item['price']} ₽\n"
+            price_text = f"{item['price']} ₽"
+            if item.get('is_promo', False):
+                code = applied_promo['code'] if applied_promo else ''
+                price_text = f"бесплатно по промокоду {code}"
+            admin_order_text += f"• {item['name']} — {price_text}\n"
         admin_order_text += "\n"
 
-    admin_order_text += f"Сумма заказа: {total_items} ₽\n"
+    admin_order_text += f"Сумма позиций: {subtotal} ₽\n"
+    if applied_promo and applied_promo['type'] == 'discount':
+        admin_order_text += f"Скидка по промокоду {applied_promo['code']}: {discount} ₽\n"
     if delivery_type == "delivery":
         if delivery_cost == 0:
             admin_order_text += "Доставка: бесплатно\n"
@@ -629,12 +829,18 @@ async def get_comment(message: Message, state: FSMContext, bot: Bot):
         client_order_text += f"<b>{cat}</b>\n"
         for item in items:
             desc = item.get('desc', '').strip()
-            client_order_text += f"• {item['name']} — {item['price']} ₽\n"
+            price_text = f"{item['price']} ₽"
+            if item.get('is_promo', False):
+                code = applied_promo['code'] if applied_promo else ''
+                price_text = f"бесплатно по промокоду {code}"
+            client_order_text += f"• {item['name']} — {price_text}\n"
             if desc:
                 client_order_text += f"  {desc}\n"
         client_order_text += "\n"
 
-    client_order_text += f"Сумма заказа: {total_items} ₽\n"
+    client_order_text += f"Сумма позиций: {subtotal} ₽\n"
+    if applied_promo and applied_promo['type'] == 'discount':
+        client_order_text += f"Скидка по промокоду {applied_promo['code']}: {discount} ₽\n"
     if delivery_type == "delivery":
         if delivery_cost == 0:
             client_order_text += "Доставка: бесплатно\n"
@@ -643,12 +849,24 @@ async def get_comment(message: Message, state: FSMContext, bot: Bot):
     client_order_text += f"<b>К оплате: {final_total} ₽</b>"
 
     # Сохраняем в БД
-    append_order(
-        admin_order_text, phone=phone_for_db, delivery_type=delivery_type, delivery_address=delivery_address,
-        comment=comment, username=current_username, prep_time=prep_time,
-        delivery_cost=delivery_cost, payment_method=payment_method, cash_amount=cash_amount,
+    local_now = (datetime.datetime.utcnow() + LOCAL_TZ_OFFSET).strftime("%d.%m.%Y %H:%M")
+    order_id = append_order(
+        admin_order_text,
+        phone_for_db,
+        delivery_type,
+        delivery_address,
+        comment=comment,
+        username=current_username,
+        prep_time=prep_time,
+        delivery_cost=delivery_cost,
+        payment_method=payment_method,
+        cash_amount=cash_amount,
         user_id=user_id_str
-    )
+        )
+
+    # Mark promo used
+    if applied_promo:
+        mark_promo_as_used(user_id_str, applied_promo['code'], order_id)
 
     local_now = (datetime.datetime.utcnow() + LOCAL_TZ_OFFSET).strftime("%d.%m.%Y %H:%M")
     local_today = (datetime.datetime.utcnow() + LOCAL_TZ_OFFSET).date()
@@ -721,8 +939,8 @@ async def clear_addresses(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "user_clear_cart")
 async def clear_cart(callback: CallbackQuery, state: FSMContext):
-    await state.update_data(cart=[])
-    await callback.answer("Корзина очищена")
+    await state.update_data(cart=[], applied_promo=None, promo_discount=0)
+    await callback.answer("Корзина очищена", show_alert=False)
     await show_categories(callback, state)
 
 
