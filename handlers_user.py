@@ -22,15 +22,15 @@ LOCAL_TZ_OFFSET = datetime.timedelta(hours=8)
 
 # Рабочее время: 9:00 - 21:00 местного
 RESTAURANT_OPEN = datetime.time(9, 0)
-RESTAURANT_CLOSE = datetime.time(21, 0)
+RESTAURANT_CLOSE = datetime.time(19, 0)
 
 # Время для заказов: с 10:00 до 20:30 шаг 30 мин
 ORDER_START_HOUR = 10
 ORDER_END_HOUR = 20
 TIME_STEP_MINUTES = 30
 
-ORDER_END_TIME = datetime.time(20, 30)  # ← НОВОЕ: заказы принимаются до 20:30
-PICKUP_ORDER_END_TIME = datetime.time(20, 45)  # ← НОВОЕ: для самовывоза заказы (и "Ближайшее время") до 20:45
+ORDER_END_TIME = datetime.time(19, 00)  # ← НОВОЕ: заказы принимаются до 20:30
+PICKUP_ORDER_END_TIME = datetime.time(19, 00)  # ← НОВОЕ: для самовывоза заказы (и "Ближайшее время") до 20:45
 
 # Минимальное время подготовки
 PICKUP_PREPARE_MINUTES = 30   # для самовывоза
@@ -102,12 +102,12 @@ def get_restaurant_status_text():
 
     if RESTAURANT_OPEN <= local_time < RESTAURANT_CLOSE:
         if local_time >= ORDER_END_TIME:
-            return "🟢 Ресторан сейчас открыт (до 21:00), но заказы принимаются только до 20:30. Ваш заказ будет на завтра."
+            return "🟢 Мы сейчас открыты, но заказы принимаются только до 19:00. Ваш заказ будет оформлен на завтра."
         else:
-            return "🟢 Ресторан сейчас открыт (до 21:00)"
+            return "🟢 Мы сейчас открыты (до 19:00)"
     else:
         next_date = (local_now + datetime.timedelta(days=1)).strftime("%d.%m") if local_time >= RESTAURANT_CLOSE else local_now.strftime("%d.%m")
-        return f"🔴 Ресторан сейчас закрыт (откроется в 9:00). Заказ будет оформлен на {next_date}."
+        return f"🔴 Мы уже закрыты (откроется завтра в 9:00). Ваш заказ будет оформлен на {next_date}."
 
 
 async def show_categories(msg_or_cb, state: FSMContext):
