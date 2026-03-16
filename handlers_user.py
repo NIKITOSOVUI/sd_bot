@@ -102,12 +102,12 @@ def get_restaurant_status_text():
 
     if RESTAURANT_OPEN <= local_time < RESTAURANT_CLOSE:
         if local_time >= ORDER_END_TIME:
-            return "🟢 Мы сейчас открыты, но заказы принимаются только до 19:00. Ваш заказ будет оформлен на завтра."
+            return "🟢 Мы сейчас открыты, но заказы принимаются только до 20:00. Ваш заказ будет оформлен на завтра."
         else:
-            return "🟢 Мы сейчас открыты (до 19:00)"
+            return "🟢 Мы сейчас открыты (до 20:00)"
     else:
         next_date = (local_now + datetime.timedelta(days=1)).strftime("%d.%m") if local_time >= RESTAURANT_CLOSE else local_now.strftime("%d.%m")
-        return f"🔴 Мы уже закрыты (откроется завтра в 9:00). Ваш заказ будет оформлен на {next_date}."
+        return f"🔴 Мы уже закрыты (откроемся завтра в 9:00). Ваш заказ будет оформлен на {next_date}."
 
 
 async def show_categories(msg_or_cb, state: FSMContext):
