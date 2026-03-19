@@ -27,7 +27,7 @@ RESTAURANT_CLOSE = datetime.time(17, 00)
 # Время для заказов: с 10:00 до 20:30 шаг 30 мин
 ORDER_START_HOUR = 10
 ORDER_END_HOUR = 17
-TIME_STEP_MINUTES = 30
+TIME_STEP_MINUTES = 0
 
 ORDER_END_TIME = datetime.time(17, 00)  # ← НОВОЕ: заказы принимаются до 20:30
 PICKUP_ORDER_END_TIME = datetime.time(17, 00)  # ← НОВОЕ: для самовывоза заказы (и "Ближайшее время") до 20:45
