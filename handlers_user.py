@@ -26,7 +26,7 @@ RESTAURANT_CLOSE = datetime.time(16, 30)
 
 # Время для заказов: с 10:00 до 20:30 шаг 30 мин
 ORDER_START_HOUR = 10
-ORDER_END_HOUR = 16
+ORDER_END_HOUR = 16,5
 TIME_STEP_MINUTES = 30
 
 ORDER_END_TIME = datetime.time(16, 30)  # ← НОВОЕ: заказы принимаются до 20:30
