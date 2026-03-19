@@ -22,11 +22,11 @@ LOCAL_TZ_OFFSET = datetime.timedelta(hours=8)
 
 # Рабочее время: 9:00 - 21:00 местного
 RESTAURANT_OPEN = datetime.time(9, 00)
-RESTAURANT_CLOSE = datetime.time(16, 59)
+RESTAURANT_CLOSE = datetime.time(16, 30)
 
 # Время для заказов: с 10:00 до 20:30 шаг 30 мин
 ORDER_START_HOUR = 10
-ORDER_END_HOUR = 17
+ORDER_END_HOUR = 16
 TIME_STEP_MINUTES = 30
 
 ORDER_END_TIME = datetime.time(16, 30)  # ← НОВОЕ: заказы принимаются до 20:30
