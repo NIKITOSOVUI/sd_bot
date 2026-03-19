@@ -22,15 +22,15 @@ LOCAL_TZ_OFFSET = datetime.timedelta(hours=8)
 
 # Рабочее время: 9:00 - 21:00 местного
 RESTAURANT_OPEN = datetime.time(9, 00)
-RESTAURANT_CLOSE = datetime.time(20, 00)
+RESTAURANT_CLOSE = datetime.time(17, 00)
 
 # Время для заказов: с 10:00 до 20:30 шаг 30 мин
 ORDER_START_HOUR = 10
-ORDER_END_HOUR = 20
+ORDER_END_HOUR = 17
 TIME_STEP_MINUTES = 30
 
-ORDER_END_TIME = datetime.time(20, 00)  # ← НОВОЕ: заказы принимаются до 20:30
-PICKUP_ORDER_END_TIME = datetime.time(20, 00)  # ← НОВОЕ: для самовывоза заказы (и "Ближайшее время") до 20:45
+ORDER_END_TIME = datetime.time(17, 00)  # ← НОВОЕ: заказы принимаются до 20:30
+PICKUP_ORDER_END_TIME = datetime.time(17, 00)  # ← НОВОЕ: для самовывоза заказы (и "Ближайшее время") до 20:45
 
 # Минимальное время подготовки
 PICKUP_PREPARE_MINUTES = 30   # для самовывоза
@@ -102,9 +102,9 @@ def get_restaurant_status_text():
 
     if RESTAURANT_OPEN <= local_time < RESTAURANT_CLOSE:
         if local_time >= ORDER_END_TIME:
-            return "🟢 Мы сейчас открыты, но заказы принимаются только до 20:00. Ваш заказ будет оформлен на завтра."
+            return "🟢 Мы сейчас открыты, но заказы принимаются только до 17:00. Ваш заказ будет оформлен на завтра."
         else:
-            return "🟢 Мы сейчас открыты (до 20:00)"
+            return "🟢 Мы сейчас открыты (до 18:00)"
     else:
         next_date = (local_now + datetime.timedelta(days=1)).strftime("%d.%m") if local_time >= RESTAURANT_CLOSE else local_now.strftime("%d.%m")
         return f"🔴 Мы уже закрыты (откроемся завтра в 9:00). Ваш заказ будет оформлен на {next_date}."
