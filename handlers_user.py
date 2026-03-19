@@ -60,7 +60,7 @@ def generate_time_options(min_delay_minutes: int = PICKUP_PREPARE_MINUTES):
 
     # Всегда корректируем на окно заказов: не раньше 10:00, не позже 20:30
     start_time = datetime.time(ORDER_START_HOUR, 0)
-    end_time_limit = datetime.time(ORDER_END_HOUR, 30)
+    end_time_limit = datetime.time(ORDER_END_HOUR, 0)
 
     # Если слишком рано — ставим 10:00 той же даты
     if min_time.time() < start_time:
